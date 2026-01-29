@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  # MySQL数据库
+  mysql:
+    image: mysql:8.0
+    container_name: ai-chat-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_DATABASE: ai_chat
+      MYSQL_USER: aichat
+      MYSQL_PASSWORD: aichatpassword
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - ai-chat-network
+    healthcheck:
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: ai-chat-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - ai-chat-network
+
+  # FastAPI后端
+  backend:
+    build: ./backend
+    container_name: ai-chat-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=mysql+pymysql://aichat:aichatpassword@mysql:3306/ai_chat
+      - REDIS_URL=redis://redis:6379/0
+      # 强制指定 Dify 配置 (使用 80 端口，对应 Nginx)
+      - DIFY_API_KEY=app-eruXC70ovNO9aRhbbrNUiGYm
+      - DIFY_BASE_URL=http://127.0.0.1/v1
+      - SECRET_KEY=your-secret-key-change-in-production
+    volumes:
+      - ./backend:/app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - ai-chat-network
+
+  # Vue前端
+  frontend:
+    build: ./frontend
+    container_name: ai-chat-frontend
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+    depends_on:
+      - backend
+    networks:
+      - ai-chat-network
+
+networks:
+  ai-chat-network:
+    driver: bridge
+
+volumes:
+  mysql_data:

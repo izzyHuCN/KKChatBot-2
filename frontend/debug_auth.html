@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>前端认证详细调试</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }
+        .success { color: green; }
+        .error { color: red; }
+        .warning { color: orange; }
+        pre { background: #f5f5f5; padding: 10px; border-radius: 3px; overflow-x: auto; }
+        button { margin: 5px; padding: 10px 15px; font-size: 14px; }
+        .log-entry { margin: 5px 0; padding: 5px; border-left: 3px solid #ccc; }
+        .request-log { background: #e8f4f8; }
+        .response-log { background: #f8f4e8; }
+        .error-log { background: #f8e8e8; }
+    </style>
+</head>
+<body>
+    <h1>🔍 前端认证详细调试工具</h1>
+    
+    <div class="section">
+        <h2>📋 快速测试</h2>
+        <button onclick="runFullTest()">🚀 运行完整测试</button>
+        <button onclick="clearLogs()">🗑️ 清空日志</button>
+        <button onclick="checkLocalStorage()">💾 检查本地存储</button>
+        <button onclick="testDirectAPI()">🔌 直接API测试</button>
+    </div>
+    
+    <div class="section">
+        <h2>📊 测试结果</h2>
+        <div id="testResults"></div>
+    </div>
+    
+    <div class="section">
+        <h2>📝 详细日志</h2>
+        <div id="debugLog"></div>
+    </div>
+
+    <script>
+        let requestCount = 0;
+        let capturedRequests = [];
+        
+        // 拦截所有XMLHttpRequest
+        const originalXHR = window.XMLHttpRequest;
+        const originalOpen = originalXHR.prototype.open;
+        const originalSetRequestHeader = originalXHR.prototype.setRequestHeader;
+        const originalSend = originalXHR.prototype.send;
+        
+        function log(message, type = 'info') {
+            const logDiv = document.getElementById('debugLog');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}-log`;
+            entry.innerHTML = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+        
+        function clearLogs() {
+            document.getElementById('debugLog').innerHTML = '';
+            document.getElementById('testResults').innerHTML = '';
+            capturedRequests = [];
+            requestCount = 0;
+        }
+        
+        function checkLocalStorage() {
+            const token = localStorage.getItem('access_token');
+            const result = document.getElementById('testResults');
+            
+            if (token) {
+                result.innerHTML = `<p class="success">✅ Token存在: ${token.substring(0, 30)}...</p>`;
+                log(`Token found: ${token.substring(0, 30)}...`, 'request');
+            } else {
+                result.innerHTML = `<p class="error">❌ Token不存在</p>`;
+                log('No token found in localStorage', 'error');
+            }
+        }
+        
+        function testDirectAPI() {
+            log('Starting direct API test...', 'request');
+            
+            // 测试登录
+            fetch('http://localhost:8000/auth/login', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'username=admin&password=123456'
+            })
+            .then(response => {
+                log(`Login response status: ${response.status}`, 'response');
+                return response.json();
+            })
+            .then(data => {
+                log(`Login response data: ${JSON.stringify(data, null, 2)}`, 'response');
+                
+                if (data.access_token) {
+                    localStorage.setItem('access_token', data.access_token);
+                    log('Token saved to localStorage', 'success');
+                    
+                    // 测试聊天API
+                    return testChatAPI(data.access_token);
+                } else {
+                    throw new Error('No access_token in response');
+                }
+            })
+            .then(() => {
+                log('Direct API test completed successfully', 'success');
+            })
+            .catch(error => {
+                log(`Direct API test failed: ${error.message}`, 'error');
+            });
+        }
+        
+        function testChatAPI(token) {
+            log('Testing chat API with token...', 'request');
+            
+            return fetch('http://localhost:8000/api/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({message: 'Hello from debug tool'})
+            })
+            .then(response => {
+                log(`Chat API response status: ${response.status}`, 'response');
+                return response.json();
+            })
+            .then(data => {
+                log(`Chat API response data: ${JSON.stringify(data, null, 2)}`, 'response');
+                return data;
+            });
+        }
+        
+        function runFullTest() {
+            clearLogs();
+            log('Starting full authentication test...', 'request');
+            
+            // 检查当前状态
+            checkLocalStorage();
+            
+            // 运行直接API测试
+            testDirectAPI();
+            
+            // 监控网络请求
+            monitorNetworkRequests();
+        }
+        
+        function monitorNetworkRequests() {
+            // 重新设置拦截器
+            originalXHR.prototype.open = function(method, url, async, user, password) {
+                this._method = method;
+                this._url = url;
+                this._headers = {};
+                this._requestId = ++requestCount;
+                
+                log(`XHR ${this._requestId}: ${method} ${url}`, 'request');
+                
+                return originalOpen.apply(this, arguments);
+            };
+            
+            originalXHR.prototype.setRequestHeader = function(header, value) {
+                this._headers[header] = value;
+                log(`XHR ${this._requestId}: Setting header ${header}: ${value}`, 'request');
+                return originalSetRequestHeader.apply(this, arguments);
+            };
+            
+            originalXHR.prototype.send = function(data) {
+                log(`XHR ${this._requestId}: Sending data: ${data}`, 'request');
+                log(`XHR ${this._requestId}: Headers: ${JSON.stringify(this._headers, null, 2)}`, 'request');
+                
+                const originalOnReadyStateChange = this.onreadystatechange;
+                this.onreadystatechange = function() {
+                    if (this.readyState === 4) {
+                        log(`XHR ${this._requestId}: Response status: ${this.status}`, 'response');
+                        log(`XHR ${this._requestId}: Response headers: ${this.getAllResponseHeaders()}`, 'response');
+                        
+                        try {
+                            const responseText = this.responseText;
+                            log(`XHR ${this._requestId}: Response body: ${responseText}`, 'response');
+                            
+                            if (this.status === 403) {
+                                log(`XHR ${this._requestId}: ⚠️ 403 Forbidden detected!`, 'error');
+                                
+                                // 分析403错误
+                                if (!this._headers['Authorization']) {
+                                    log(`XHR ${this._requestId}: ❌ No Authorization header found!`, 'error');
+                                } else {
+                                    log(`XHR ${this._requestId}: ✅ Authorization header present: ${this._headers['Authorization']}`, 'success');
+                                }
+                            }
+                        } catch (e) {
+                            log(`XHR ${this._requestId}: Error reading response: ${e.message}`, 'error');
+                        }
+                    }
+                    
+                    if (originalOnReadyStateChange) {
+                        originalOnReadyStateChange.apply(this, arguments);
+                    }
+                };
+                
+                return originalSend.apply(this, arguments);
+            };
+            
+            log('Network monitoring started', 'success');
+        }
+        
+        // 页面加载时自动开始监控
+        window.onload = function() {
+            monitorNetworkRequests();
+            checkLocalStorage();
+        };
+    </script>
+</body>
+</html>

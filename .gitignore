@@ -1,0 +1,36 @@
+# General
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+env/
+.env
+.env.local
+.env.*.local
+*.egg-info/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+
+# Database
+*.sqlite3
+*.db
+backend/ai_chat.db
+
+# Uploads
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Trae/Agent logs
+.trae/

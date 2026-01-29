@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>前端认证测试</title>
+</head>
+<body>
+    <h1>前端认证测试</h1>
+    
+    <div>
+        <h2>1. 测试登录</h2>
+        <button onclick="testLogin()">测试登录</button>
+        <div id="loginResult"></div>
+    </div>
+    
+    <div>
+        <h2>2. 检查localStorage</h2>
+        <button onclick="checkLocalStorage()">检查Token</button>
+        <div id="localStorageResult"></div>
+    </div>
+    
+    <div>
+        <h2>3. 测试聊天API</h2>
+        <button onclick="testChatAPI()">测试聊天</button>
+        <div id="chatResult"></div>
+    </div>
+    
+    <div>
+        <h2>4. 检查请求头</h2>
+        <div id="requestHeaders"></div>
+    </div>
+
+    <script>
+        let capturedHeaders = {};
+        
+        // 拦截XMLHttpRequest来捕获请求头
+        const originalOpen = XMLHttpRequest.prototype.open;
+        const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+        
+        XMLHttpRequest.prototype.setRequestHeader = function(header, value) {
+            capturedHeaders[header] = value;
+            return originalSetRequestHeader.apply(this, arguments);
+        };
+
+        async function testLogin() {
+            const result = document.getElementById('loginResult');
+            try {
+                const response = await fetch('http://localhost:8000/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: 'username=admin&password=123456'
+                });
+                
+                const data = await response.json();
+                if (response.ok) {
+                    localStorage.setItem('access_token', data.access_token);
+                    result.innerHTML = `<p style="color: green;">✅ 登录成功！Token已保存</p>`;
+                } else {
+                    result.innerHTML = `<p style="color: red;">❌ 登录失败: ${JSON.stringify(data)}</p>`;
+                }
+            } catch (error) {
+                result.innerHTML = `<p style="color: red;">❌ 错误: ${error.message}</p>`;
+            }
+        }
+        
+        function checkLocalStorage() {
+            const result = document.getElementById('localStorageResult');
+            const token = localStorage.getItem('access_token');
+            if (token) {
+                result.innerHTML = `<p style="color: green;">✅ Token存在: ${token.substring(0, 20)}...</p>`;
+            } else {
+                result.innerHTML = `<p style="color: red;">❌ Token不存在</p>`;
+            }
+        }
+        
+        async function testChatAPI() {
+            const result = document.getElementById('chatResult');
+            const headersResult = document.getElementById('requestHeaders');
+            
+            // 重置捕获的头信息
+            capturedHeaders = {};
+            
+            try {
+                const token = localStorage.getItem('access_token');
+                const response = await fetch('http://localhost:8000/api/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({message: 'Hello测试'})
+                });
+                
+                const data = await response.json();
+                if (response.ok) {
+                    result.innerHTML = `<p style="color: green;">✅ 聊天API成功: ${data.message}</p>`;
+                } else {
+                    result.innerHTML = `<p style="color: red;">❌ 聊天API失败: ${JSON.stringify(data)}</p>`;
+                }
+                
+                // 显示捕获的请求头
+                headersResult.innerHTML = `<p>请求头: <pre>${JSON.stringify(capturedHeaders, null, 2)}</pre></p>`;
+                
+            } catch (error) {
+                result.innerHTML = `<p style="color: red;">❌ 错误: ${error.message}</p>`;
+            }
+        }
+        
+        // 页面加载时自动检查
+        window.onload = function() {
+            checkLocalStorage();
+        };
+    </script>
+</body>
+</html>

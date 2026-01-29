@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSE Test</title>
+</head>
+<body>
+    <h1>SSE Debug Test</h1>
+    <div id="status">Status: Idle</div>
+    <div id="logs" style="background: #f0f0f0; padding: 10px; white-space: pre-wrap; height: 300px; overflow: auto; border: 1px solid #ccc;"></div>
+    
+    <button onclick="startTest()">Start Test</button>
+
+    <script>
+        function log(msg) {
+            const div = document.getElementById('logs');
+            div.textContent += msg + '\n';
+            div.scrollTop = div.scrollHeight;
+            console.log(msg);
+        }
+
+        async function startTest() {
+            const token = localStorage.getItem('access_token');
+            if (!token) {
+                log('Error: No access_token found in localStorage. Please login in the main app first.');
+                return;
+            }
+
+            log('Starting test...');
+            log('Token found: ' + token.substring(0, 10) + '...');
+
+            try {
+                // Use relative path to test via Vite proxy
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({
+                        message: "Hello from test script",
+                        stream: true
+                    })
+                });
+
+                log(`Response status: ${response.status}`);
+                if (!response.ok) {
+                    const text = await response.text();
+                    log(`Error body: ${text}`);
+                    return;
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) {
+                        log('Stream complete');
+                        break;
+                    }
+                    const chunk = decoder.decode(value, { stream: true });
+                    log(`Received chunk (${chunk.length} bytes): ${chunk}`);
+                }
+
+            } catch (e) {
+                log(`Fetch error: ${e.message}`);
+            }
+        }
+    </script>
+</body>
+</html>

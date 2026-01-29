@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""
+简化系统测试 - 专注于后端服务本身
+"""
+import httpx
+import json
+import time
+import sys
+from typing import Dict, Any
+
+# Configuration
+BASE_URL = "http://localhost:8000"
+USERNAME = "admin"
+PASSWORD = "123456"
+TEST_MESSAGE = "Hello, are you online?"
+
+def print_test_header(test_name: str):
+    print(f"\n{'='*60}")
+    print(f"TEST: {test_name}")
+    print(f"{'='*60}")
+
+def print_result(success: bool, message: str, details: str = ""):
+    status = "✅ PASS" if success else "❌ FAIL"
+    print(f"{status}: {message}")
+    if details:
+        print(f"Details: {details}")
+
+def test_backend_health():
+    """Test if backend is running"""
+    print_test_header("Backend Health Check")
+    try:
+        response = httpx.get(f"{BASE_URL}/health", timeout=5)
+        print_result(response.status_code == 200, "Backend health endpoint", f"Status: {response.status_code}")
+        return response.status_code == 200
+    except Exception as e:
+        print_result(False, "Backend health check failed", str(e))
+        return False
+
+def test_docs_endpoint():
+    """Test if API docs are accessible"""
+    print_test_header("API Documentation Check")
+    try:
+        response = httpx.get(f"{BASE_URL}/docs", timeout=5)
+        print_result(response.status_code == 200, "API documentation accessible", f"Status: {response.status_code}")
+        return response.status_code == 200
+    except Exception as e:
+        print_result(False, "API documentation not accessible", str(e))
+        return False
+
+def test_login():
+    """Test login authentication"""
+    print_test_header("Login Authentication")
+    try:
+        # Use OAuth2PasswordRequestForm format
+        response = httpx.post(
+            f"{BASE_URL}/auth/login",
+            data={"username": USERNAME, "password": PASSWORD},
+            timeout=10
+        )
+        
+        print(f"Login response status: {response.status_code}")
+        print(f"Login response: {response.text}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            token = data.get("access_token")
+            if token:
+                print_result(True, "Login successful", f"Token received: {token[:20]}...")
+                return token
+            else:
+                print_result(False, "Login response missing token", str(data))
+                return None
+        else:
+            print_result(False, f"Login failed with status {response.status_code}", response.text)
+            return None
+            
+    except Exception as e:
+        print_result(False, "Login request failed", str(e))
+        return None
+
+def test_chat_api(token: str):
+    """Test chat API with authentication"""
+    print_test_header("Chat API Test")
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        response = httpx.post(
+            f"{BASE_URL}/api/chat",
+            json={"message": TEST_MESSAGE},
+            headers=headers,
+            timeout=30
+        )
+        
+        print(f"Chat response status: {response.status_code}")
+        print(f"Chat response: {response.text}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            message = data.get("message", "")
+            if message:
+                print_result(True, "Chat API working", f"Response: {message[:100]}...")
+                return True
+            else:
+                print_result(False, "Chat API returned empty message", str(data))
+                return False
+        elif response.status_code == 401:
+            print_result(False, "Chat API authentication failed", response.text)
+            return False
+        else:
+            print_result(False, f"Chat API failed with status {response.status_code}", response.text)
+            return False
+            
+    except Exception as e:
+        print_result(False, "Chat API request failed", str(e))
+        return False
+
+def run_simple_test():
+    """Run simplified system test"""
+    print("🚀 Starting KKChatBot-2 Simplified System Test")
+    print(f"Testing against: {BASE_URL}")
+    
+    results = []
+    
+    # Test 1: Backend health
+    results.append(("Backend Health", test_backend_health()))
+    
+    # Test 2: API Documentation
+    results.append(("API Documentation", test_docs_endpoint()))
+    
+    # Test 3: Login authentication
+    token = test_login()
+    if token:
+        results.append(("Login", True))
+        
+        # Test 4: Chat API with token
+        chat_result = test_chat_api(token)
+        results.append(("Chat API", chat_result))
+    else:
+        results.append(("Login", False))
+        results.append(("Chat API", False))
+    
+    # Summary
+    print(f"\n{'='*60}")
+    print("TEST SUMMARY")
+    print(f"{'='*60}")
+    
+    passed = sum(1 for _, result in results if result)
+    total = len(results)
+    
+    for test_name, result in results:
+        status = "✅ PASS" if result else "❌ FAIL"
+        print(f"{status}: {test_name}")
+    
+    print(f"\nOverall: {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("🎉 All tests passed! Basic system should be working.")
+        return True
+    else:
+        print("⚠️  Some tests failed. Check the details above.")
+        return False
+
+if __name__ == "__main__":
+    success = run_simple_test()
+    sys.exit(0 if success else 1)
