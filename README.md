@@ -35,7 +35,7 @@ graph TD
     end
     
     Frontend -->|REST / SSE| Backend_API[后端 API]
-    Frontend -->|WebSocket (JSON/Binary)| Backend_WS[后端 WebSocket]
+    Frontend -->|WebSocket JSON or Binary| Backend_WS[后端 WebSocket]
     
     subgraph Backend_App [后端 FastAPI]
         Router[路由层]
