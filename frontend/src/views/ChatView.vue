@@ -18,7 +18,7 @@
       <div class="water-tank">
         <video 
           ref="avatarVideo"
-          :src="currentAvatarVideo" 
+          :src="mainAvatarSource" 
           autoplay 
           loop 
           muted 
@@ -56,6 +56,9 @@
     
     <!-- 遮罩层 -->
     <div v-if="isSidebarOpen" class="overlay" @click="isSidebarOpen = false"></div>
+
+    <!-- Background Music -->
+    <audio ref="bgmAudio" src="/avatars/xibao_bgm.mp3" loop></audio>
 
     <div class="chat-header">
       <!-- 侧边栏切换按钮 -->
@@ -143,36 +146,246 @@
         </button>
 
         <!-- 实时语音通话 -->
-        <button class="action-btn" @click="toggleRealTimeMode" :class="{ active: isRealTimeMode }" title="实时语音通话" :disabled="loading">
-          <span v-if="isRealTimeMode">📞</span>
-          <span v-else>☎️</span>
+        <button class="action-btn" @click="toggleVideoCallMode" :class="{ active: isVideoCallMode }" title="视频通话" :disabled="loading">
+          <span v-if="isVideoCallMode">📹</span>
+          <span v-else>📹</span>
         </button>
 
-        <!-- 发送按钮 -->
         <button class="send-btn" @click="sendMessage" :disabled="loading || !userInput.trim()">
           SEND
         </button>
       </div>
     </div>
+    
+    <!-- Video Call Overlay -->
+    <div v-if="isVideoCallMode" class="video-call-overlay">
+      <div class="video-container">
+        <!-- Main Video (Swappable) -->
+        <div class="main-video-wrapper">
+             <!-- If main is bot -->
+             <video 
+               v-if="!isUserMain"
+               ref="mainBotVideo"
+               :src="videoAvatarSource" 
+               autoplay loop muted playsinline
+               class="main-video"
+             ></video>
+             
+             <!-- If main is user -->
+             <video 
+               v-else
+               ref="mainUserVideo"
+               autoplay muted playsinline
+               class="main-video user-cam"
+             ></video>
+             
+             <!-- Recognition Result Overlay -->
+             <div v-if="lastGesture" class="gesture-toast">
+                🖐️ {{ lastGesture }}
+             </div>
+
+             <!-- Vision Status Indicator -->
+             <div class="vision-status" :class="{ 'active': visionStatus === 'enabled' }">
+                <span class="status-dot"></span>
+                {{ visionStatus === 'enabled' ? '视觉已开启' : '视觉初始化中/失败' }}
+             </div>
+        </div>
+        
+        <!-- Small Video (PIP) -->
+        <div class="pip-video-wrapper" @click="isUserMain = !isUserMain">
+             <!-- If main is bot, pip is user -->
+             <video 
+               v-if="!isUserMain"
+               ref="pipUserVideo"
+               autoplay muted playsinline
+               class="pip-video user-cam"
+             ></video>
+             
+             <!-- If main is user, pip is bot -->
+             <video 
+               v-else
+               ref="pipBotVideo"
+               :src="videoAvatarSource" 
+               autoplay loop muted playsinline
+               class="pip-video"
+             ></video>
+        </div>
+        
+        <!-- Controls -->
+        <div class="video-controls">
+            <button class="control-btn" @click="toggleCamera" :class="{ off: !isCameraOn }">
+                {{ isCameraOn ? '📷 On' : '📷 Off' }}
+            </button>
+            <button class="control-btn close-btn" @click="toggleVideoCallMode">
+                ❌ 挂断
+            </button>
+        </div>
+      </div>
+      
+      <!-- Hidden Canvas for Frame Capture -->
+      <canvas ref="captureCanvas" style="display:none;"></canvas>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue';
+import { ref, nextTick, onMounted, onUnmounted, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import api from '../services/api';
 
 const router = useRouter();
 // 状态视频路径
 const videoPaths = {
-  sleeping: '/avatars/xibao_sleeping.mp4',
+  // User requested to simplify: Thinking/Listening -> thinking.mp4, Talking -> talking.mp4
+  sleeping: '/avatars/xibao_sleeping.mp4', 
   thinking: '/avatars/xibao_thinking.mp4',
   talking: '/avatars/xibao_talking.mp4'
 };
 
-// 计算当前应该播放的视频
-const currentAvatarVideo = computed(() => {
-  if (isPlayingAudio.value) {
+// ... existing code ...
+
+// --- Video Call Mode ---
+const isVideoCallMode = ref(false);
+const isUserMain = ref(false); // Default: Bot is main
+const isCameraOn = ref(true);
+const localStream = ref(null);
+const mainUserVideo = ref(null);
+const pipUserVideo = ref(null);
+const captureCanvas = ref(null);
+const lastGesture = ref('');
+const visionStatus = ref('disabled'); // enabled, disabled
+let frameInterval = null;
+
+const toggleVideoCallMode = async () => {
+    if (isVideoCallMode.value) {
+        stopVideoCall();
+    } else {
+        await startVideoCall();
+    }
+};
+
+const startVideoCall = async () => {
+    // Start Real-time audio first (reusing existing logic)
+    if (!isRealTimeMode.value) {
+        // Ensure we enable audio recording for speech recognition
+        await startRealTimeMode();
+        
+        // Wait for WebSocket to be open (up to 5 seconds)
+        let retries = 0;
+        while ((!websocket || websocket.readyState !== WebSocket.OPEN) && retries < 50) {
+             await new Promise(r => setTimeout(r, 100));
+             retries++;
+        }
+        
+        if (!websocket || websocket.readyState !== WebSocket.OPEN) {
+             alert("无法连接到语音服务器，请稍后再试。");
+             stopRealTimeMode();
+             return;
+        }
+    }
+    
+    isVideoCallMode.value = true;
+    isCameraOn.value = true;
+    
+    await nextTick(); // Wait for DOM
+    await startCamera();
+    
+    // Start sending frames
+    startFrameTransmission();
+};
+
+const stopVideoCall = () => {
+    isVideoCallMode.value = false;
+    stopCamera();
+    stopFrameTransmission();
+    
+    // Ensure we stop real-time mode to reset state (as requested by user interaction flow)
+    stopRealTimeMode(); 
+};
+
+const startCamera = async () => {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        localStream.value = stream;
+        attachStreamToVideo();
+    } catch (e) {
+        console.error("Camera error:", e);
+        alert("无法访问摄像头");
+        isCameraOn.value = false;
+    }
+};
+
+const stopCamera = () => {
+    if (localStream.value) {
+        localStream.value.getTracks().forEach(track => track.stop());
+        localStream.value = null;
+    }
+    isCameraOn.value = false;
+};
+
+const toggleCamera = async () => {
+    if (isCameraOn.value) {
+        stopCamera();
+    } else {
+        isCameraOn.value = true;
+        await startCamera();
+    }
+};
+
+const attachStreamToVideo = () => {
+    if (!localStream.value) return;
+    
+    nextTick(() => {
+        // We need to attach to whichever video element is active for user
+        if (mainUserVideo.value) mainUserVideo.value.srcObject = localStream.value;
+        if (pipUserVideo.value) pipUserVideo.value.srcObject = localStream.value;
+    });
+};
+
+// Watch for layout swap to re-attach stream
+watch(isUserMain, () => {
+    attachStreamToVideo();
+});
+
+    const startFrameTransmission = () => {
+    if (frameInterval) clearInterval(frameInterval);
+    
+    // Send frame every 200ms (5 FPS) - Increased for faster response
+    frameInterval = setInterval(() => {
+        if (!isCameraOn.value || !localStream.value) return;
+        if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
+        
+        sendFrame();
+    }, 200); 
+};
+
+const stopFrameTransmission = () => {
+    if (frameInterval) clearInterval(frameInterval);
+    frameInterval = null;
+};
+
+const sendFrame = () => {
+    const videoEl = isUserMain.value ? mainUserVideo.value : pipUserVideo.value;
+    if (!videoEl || !captureCanvas.value) return;
+    
+    const ctx = captureCanvas.value.getContext('2d');
+    // Resize to smaller dimension to save bandwidth (e.g., 320x240)
+    captureCanvas.value.width = 320;
+    captureCanvas.value.height = 240;
+    
+    ctx.drawImage(videoEl, 0, 0, 320, 240);
+    const base64Data = captureCanvas.value.toDataURL('image/jpeg', 0.6); // Low quality jpeg
+    
+    // Send special packet
+    websocket.send(JSON.stringify({
+        type: 'video_frame',
+        data: base64Data
+    }));
+};
+
+
+const mainAvatarSource = computed(() => {
+  if (isPlayingAudio.value && !isVideoCallMode.value) {
     return videoPaths.talking;
   }
   if (loading.value) {
@@ -180,6 +393,16 @@ const currentAvatarVideo = computed(() => {
   }
   return videoPaths.sleeping;
 });
+
+const videoAvatarSource = computed(() => {
+  if (isPlayingAudio.value) {
+    return videoPaths.talking;
+  }
+  return videoPaths.thinking;
+});
+
+// Deprecated: currentAvatarVideo (replaced by above)
+
 const messages = ref([
   { role: 'assistant', content: '(～﹃～)~zZ' }
 ]);
@@ -194,6 +417,7 @@ const ignoreWSAudio = ref(false); // 用于在打断后忽略旧的 WebSocket �
 
 const avatarVideo = ref(null);
 const avatarWrapper = ref(null);
+const bgmAudio = ref(null);
 
 // --- Draggable Logic ---
 const avatarX = ref(20);
@@ -361,6 +585,39 @@ const formatTime = (date) => {
   return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 };
 
+// --- BGM Control ---
+const playBGM = () => {
+    if (bgmAudio.value) {
+        bgmAudio.value.volume = 0.2; // Set low volume for background
+        bgmAudio.value.play().catch(e => {
+            console.log("Autoplay prevented, waiting for user interaction");
+            // Add one-time click listener to start BGM
+            const startOnInteraction = () => {
+                if (bgmAudio.value && !isVideoCallMode.value) {
+                    bgmAudio.value.play();
+                }
+                document.removeEventListener('click', startOnInteraction);
+            };
+            document.addEventListener('click', startOnInteraction);
+        });
+    }
+};
+
+const pauseBGM = () => {
+    if (bgmAudio.value) {
+        bgmAudio.value.pause();
+    }
+};
+
+// Watch video call mode to toggle BGM
+watch(isVideoCallMode, (newVal) => {
+    if (newVal) {
+        pauseBGM();
+    } else {
+        playBGM();
+    }
+});
+
 // 组件生命周期
 onMounted(() => {
   // 检查认证状态
@@ -368,6 +625,9 @@ onMounted(() => {
   
   // 滚动到底部
   scrollToBottom();
+
+  // Start BGM
+  playBGM();
 });
 
 // Scroll to bottom
@@ -379,6 +639,10 @@ const scrollToBottom = async () => {
 };
 
 // --- Real-Time Mode (WebSocket) ---
+// 实时语音通话模式逻辑
+// 使用 WebSocket 与后端建立双向通信：
+// 发送：前端 Web Speech API 识别的文本
+// 接收：后端流式返回的文本（用于显示）和音频数据（Base64，用于播放）
 const toggleRealTimeMode = () => {
     if (isRealTimeMode.value) {
         stopRealTimeMode();
@@ -394,10 +658,10 @@ const startRealTimeMode = () => {
         return;
     }
     
-    // Stop any existing audio
+    // 开启前先停止所有正在播放的音频，避免混音
     stopAllAudio();
     
-    // Ensure voice output is on
+    // 强制开启语音输出
     voiceOutputEnabled.value = true;
     isRealTimeMode.value = true;
     
@@ -405,17 +669,23 @@ const startRealTimeMode = () => {
     const token = localStorage.getItem('access_token');
     // Determine WS URL (assume same host, different protocol)
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // If dev, hardcode localhost:8000 for simplicity as api.js uses proxy
-    // In prod, use window.location.host + /api/ws...
-    const host = 'localhost:8000'; 
+    
+    // 动态判断 Host
+    let host;
+    // import.meta.env.DEV 是 Vite 提供的环境变量，开发模式下为 true
+    if (import.meta.env.DEV) {
+        host = 'localhost:8000'; // 开发环境：直连后端
+    } else {
+        host = window.location.host; // 生产环境(Docker)：使用当前地址 (如 localhost:3000)，通过 Nginx 转发
+    }
+    
     const wsUrl = `${protocol}//${host}/api/ws/chat/${currentSessionId.value || 'new'}?token=${token}`;
     
     websocket = new WebSocket(wsUrl);
     
     websocket.onopen = () => {
         console.log('WS Connected');
-        // Start continuous recording
-        // Important: Stop any existing recognition first to avoid duplicates
+        // 连接成功后，立即开始语音识别（持续监听模式）
         stopRecording();
         startRecording();
     };
@@ -426,38 +696,71 @@ const startRealTimeMode = () => {
 
         try {
             const data = JSON.parse(event.data);
+            
+            // --- New: System Status ---
+            if (data.type === 'system_status') {
+                visionStatus.value = data.vision;
+                console.log('Vision Status:', data.vision);
+                return;
+            }
+
+            // --- New: Gesture Ack ---
+            if (data.type === 'gesture_ack') {
+                lastGesture.value = data.content;
+                setTimeout(() => { lastGesture.value = ''; }, 3000);
+                return;
+            }
+            
+            // --- New: Hangup Command ---
+            if (data.type === 'hangup') {
+                stopVideoCall();
+                return;
+            }
+
             if (data.type === 'text') {
-                // 新的文本消息意味着新的一轮回复开始，停止忽略音频
+                // 如果是直接响应的手势文本，我们不需要在UI显示，只播放语音即可(由audio类型处理)
+                if (data.is_direct) {
+                    return; 
+                }
+
+                // 收到 'text' 类型消息：表示 AI 开始生成新的回复
+                // 1. 重置 ignoreWSAudio，允许播放新的音频
                 ignoreWSAudio.value = false;
 
-                // 如果是新一轮回复的开始，确保消息列表中有一个空的 assistant 消息
-                // 判断逻辑：
-                // 1. 列表为空
-                // 2. 最后一条不是 assistant
-                // 3. 最后一条是 assistant 但已经标记为 final (上一轮结束)
+                // 2. 确保 UI 上有一个 Assistant 的消息气泡用于追加内容
                 const lastMsg = messages.value[messages.value.length - 1];
                 if (!lastMsg || lastMsg.role !== 'assistant' || lastMsg.final) {
                      messages.value.push({ role: 'assistant', content: '' });
                 }
                 
-                // 获取（可能是新创建的）最后一条消息进行追加
+                // 3. 追加文本内容
                 const currentMsg = messages.value[messages.value.length - 1];
                 currentMsg.content += data.content;
                 scrollToBottom();
                 
             } else if (data.type === 'audio') {
-                if (!isRealTimeMode.value) return; // Drop audio if stopped
-                if (ignoreWSAudio.value) return; // 忽略旧的音频片段
+                // 收到 'audio' 类型消息：包含 TTS 生成的音频片段 (Base64)
+                if (!isRealTimeMode.value) return; 
+                
+                // --- Priority Handling ---
+                // 如果是直接响应（如手势），立即打断当前所有音频并播放
+                if (data.is_direct) {
+                    stopAllAudio();
+                    ignoreWSAudio.value = false; // 确保允许播放
+                } else {
+                    // 如果当前处于“打断忽略”状态，丢弃该音频
+                    if (ignoreWSAudio.value) return;
+                }
 
-                // Decode base64 and play
+                // 解码并加入播放队列
                 const audioBlob = base64ToBlob(data.data, 'audio/mp3');
                 const audioUrl = URL.createObjectURL(audioBlob);
                 const audio = new Audio(audioUrl);
                 
-                // 提高播放倍速
+                // 提高播放倍速，使对话更流畅
                 audio.playbackRate = 1.25; 
 
-                // Play via queue
+                // 加入队列播放
                 playAudioQueue(() => new Promise(resolve => {
                     // Check again before playing
                     if (!isRealTimeMode.value) {
@@ -477,6 +780,7 @@ const startRealTimeMode = () => {
                     currentAudio.value = audio;
                 }));
             } else if (data.type === 'done') {
+                // 收到 'done' 消息：表示本轮回复结束
                 if (messages.value.length > 0) {
                     messages.value[messages.value.length - 1].final = true;
                 }
@@ -524,6 +828,9 @@ const base64ToBlob = (base64, mimeType) => {
 };
 
 // --- Voice Input (Speech Recognition) ---
+// 语音输入功能
+// 使用浏览器原生 Web Speech API (SpeechRecognition)
+// 注意：SpeechRecognition 在非 localhost 环境下通常需要 HTTPS
 const toggleVoiceInput = () => {
   if (isRecording.value) {
     stopRecording();
@@ -532,19 +839,35 @@ const toggleVoiceInput = () => {
   }
 };
 
-const startRecording = () => {
+const startRecording = async () => {
+  // 1. 检查浏览器支持
   if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
     alert('您的浏览器不支持语音输入，请使用 Chrome 或 Edge 浏览器。');
+    return;
+  }
+
+  // 2. 检查安全上下文 (HTTPS 或 localhost)
+  if (!window.isSecureContext) {
+    alert(`当前环境不安全 (${window.location.origin})，浏览器禁止访问麦克风。\n请使用 https:// 或 http://localhost:端口 访问。`);
+    return;
+  }
+
+  // 3. 尝试主动请求麦克风权限 (这通常能更有效地触发浏览器的弹窗)
+  try {
+    await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    console.error('Microphone permission denied via getUserMedia:', err);
+    alert('无法获取麦克风权限。\n请点击地址栏左侧的“锁形图标”或“设置”图标，找到“麦克风”选项，并将其设置为【允许】(Allow)。\n设置后请刷新页面。');
     return;
   }
   
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   recognition = new SpeechRecognition();
-  // 尝试设置更具体的语言代码，或者回退到通用中文
+  // 设置语言为中文
   recognition.lang = 'zh-CN'; 
-  recognition.continuous = false;
-  recognition.interimResults = true;
-  recognition.maxAlternatives = 1; // 限制候选项，可能提高响应速度
+  recognition.continuous = false; // 非连续模式，说完一句自动停止（除非在实时模式下被手动重启）
+  recognition.interimResults = true; // 允许返回临时结果（实时显示说话内容）
+  recognition.maxAlternatives = 1; 
 
   let initialInput = ''; // 记录开始录音时的已有文本
 
@@ -558,18 +881,7 @@ const startRecording = () => {
   recognition.onaudiostart = () => {
     console.log('Audio capturing started');
   };
-
-  recognition.onsoundstart = () => {
-    console.log('Sound detected');
-  };
-
-  recognition.onspeechstart = () => {
-    console.log('Speech detected');
-  };
-
-  recognition.onnomatch = (event) => {
-    console.log('No match found for speech');
-  };
+  // ... 其他事件监听省略 ...
 
   recognition.onresult = (event) => {
     let interimTranscript = '';
@@ -587,34 +899,32 @@ const startRecording = () => {
     if (isRealTimeMode.value && (finalTranscript || interimTranscript)) {
         if (isPlayingAudio.value || audioQueue.value.length > 0) {
             console.log('User spoke, interrupting audio...');
-            // 立即停止所有音频
             stopAllAudio();
-            // 同时如果可能，也应该告诉后端停止生成（虽然 websocket 比较难撤回，但前端先闭嘴是第一步）
         }
     }
 
     // 更新输入框：基础文本 + 已确认的语音 + 正在识别的语音
-    // 注意：这里简化处理，直接追加到 initialInput
-    // 实际更复杂的场景可能需要光标位置插入，但追加通常足够
     if (finalTranscript || interimTranscript) {
-        // 更新 initialInput 以累积最终结果，避免被覆盖
+        // 更新 initialInput 以累积最终结果
         if (finalTranscript) {
             initialInput += finalTranscript;
             
             // --- Real-Time Mode Logic ---
+            // 确保 WebSocket 连接正常才发送
             if (isRealTimeMode.value && websocket && websocket.readyState === WebSocket.OPEN) {
-                 // Double check interruption (though handled above)
-                 stopAllAudio();
+                 stopAllAudio(); // 再次确保打断
                  
+                 // 直接发送，不更新 userInput（避免文本框闪烁）
                  messages.value.push({ role: 'user', content: finalTranscript });
                  websocket.send(finalTranscript);
                  scrollToBottom();
-                 // Clear input for next sentence
-                 userInput.value = '';
-                 initialInput = '';
+                 
+                 // 清空 buffer，防止后续非实时模式显示
+                 initialInput = ''; 
             }
         }
         
+        // 非实时模式下，只更新输入框显示
         if (!isRealTimeMode.value) {
              userInput.value = initialInput + interimTranscript;
         }
@@ -624,14 +934,17 @@ const startRecording = () => {
   recognition.onerror = (event) => {
     console.error('Speech recognition error', event.error);
     if (event.error === 'not-allowed') {
-        alert('无法访问麦克风。请检查浏览器权限设置，并确保通过 HTTPS 或 localhost 访问。');
+        alert('无法访问麦克风。\n原因：浏览器拒绝了权限请求。\n请检查地址栏左侧的权限设置，确保允许访问麦克风。');
     } else if (event.error === 'network') {
-        // alert('语音识别网络错误。请检查您的网络连接，或尝试使用科学上网工具（语音服务可能被屏蔽）。');
+        alert('语音识别网络错误。\n请检查您的网络连接（Web Speech API 需要连接 Google 服务器），或尝试使用 Edge 浏览器。');
         console.warn('Network error in speech recognition');
     } else if (event.error === 'no-speech') {
-        // 忽略 no-speech 错误，这只是因为没说话
-        return; 
+        // 忽略未检测到语音的错误，只是停止录音
+        console.log('No speech detected');
+    } else {
+        alert('语音识别发生错误: ' + event.error);
     }
+    // ... 其他错误处理 ...
     
     if (!isRealTimeMode.value) {
         stopRecording();
@@ -640,7 +953,7 @@ const startRecording = () => {
 
   recognition.onend = () => {
     if (isRealTimeMode.value) {
-        // Auto restart for continuous mode
+        // 实时模式下，语音识别结束后自动重启，实现“永远在线”的听觉
         try {
             recognition.start();
         } catch (e) {
@@ -675,6 +988,7 @@ const toggleVoiceOutput = () => {
 };
 
 // --- Text Processing for TTS ---
+// 文本清理函数：移除不适合朗读的内容
 const cleanTextForTTS = (text) => {
     // 1. 去除 Markdown 图片链接
     let cleaned = text.replace(/!\[.*?\]\(.*?\)/g, '');
@@ -695,10 +1009,6 @@ const cleanTextForTTS = (text) => {
     // 5. 去除行尾未闭合的括号内容 (防止因断句导致朗读未闭合的动作描述)
     cleaned = cleaned.replace(/[\(（\[【“"][^）\)\]】”"]*$/g, '');
     
-    // 6. 去除颜文字 (简单匹配常见的括号组合)
-    // 这一步比较激进，可能会误伤，但为了“不出戏”，宁可错杀
-    // 很多颜文字包含特殊符号，难以完全正则，这里主要依赖上面的括号匹配
-    
     return cleaned.trim();
 };
 
@@ -718,7 +1028,8 @@ const speak = async (text, append = false) => {
   // 我们不等待 api.getTTS 完成，而是直接把处理过程放入队列
   // 这样可以实现"并行请求，串行播放"
   
-  // 捕获当前的任务代数
+  // 捕获当前的任务代数 (Generation ID)
+  // 这是一个闭包变量，用于在异步任务执行时检查是否已被新的对话打断
   const currentGenId = audioGenerationId.value;
 
   const audioTask = async () => {
@@ -781,11 +1092,13 @@ const isPlayingAudio = ref(false);
 const currentAudio = ref(null); // 当前正在播放的 Audio 对象
 const audioGenerationId = ref(0); // 音频生成代数，用于区分不同轮次的对话
 
+// 将任务加入队列并尝试处理
 const playAudioQueue = (task) => {
     audioQueue.value.push(task);
     processAudioQueue();
 };
 
+// 串行处理音频队列
 const processAudioQueue = async () => {
     if (isPlayingAudio.value || audioQueue.value.length === 0) return;
     
@@ -803,6 +1116,7 @@ const processAudioQueue = async () => {
 
 const stopAllAudio = () => {
     // 增加代数，立即使所有未完成的 TTS 请求失效
+    // 这是解决"旧语音在打断后继续播放"问题的核心
     audioGenerationId.value++;
     // 标记忽略 WS 音频，直到新一轮文本开始
     ignoreWSAudio.value = true;
@@ -890,6 +1204,8 @@ const removeAttachment = (index) => {
 const abortController = ref(null);
 
 // --- Main Chat Logic ---
+// 发送消息的主逻辑
+// 包含：状态重置、附件处理、SSE 请求发起
 const sendMessage = async () => {
   if ((!userInput.value.trim() && attachedFiles.value.length === 0) || loading.value) return;
 
@@ -948,9 +1264,10 @@ const sendMessage = async () => {
   });
   const msgIndex = messages.value.length - 1;
   
-  // 开启打字机效果
+  // 开启打字机效果 (视觉优化，使文字显示更平滑，不随网络包跳动)
   startTypewriter(msgIndex);
 
+  // SSE 消息回调：每收到一个文本块触发一次
   const onMessage = (chunk) => {
       // console.log('ChatView received chunk:', chunk);
       
@@ -988,6 +1305,7 @@ const sendMessage = async () => {
           }
 
           // 简单的句子结束符匹配 (中文和英文)
+          // 根据标点符号断句，实现"边生成边播放"
           const sentenceEndRegex = /([。！？；!?;]+|\n)/;
           const match = ttsBuffer.value.match(sentenceEndRegex);
           
@@ -1007,6 +1325,7 @@ const sendMessage = async () => {
   };
 
   // 监听会话 ID 更新 (解决记忆问题)
+  // 后端如果检测到是新会话，会返回生成的 session_id
   onMessage.onSessionUpdate = (newId) => {
       // console.log('Session ID updated:', newId);
       currentSessionId.value = newId;
@@ -1017,6 +1336,7 @@ const sendMessage = async () => {
     loading.value = false;
     
     // 播放剩余的缓冲文本 (如果有)
+    // 防止最后一句没有标点符号而被遗漏
     if (voiceOutputEnabled.value && ttsBuffer.value.trim()) {
         speak(ttsBuffer.value, true);
         ttsBuffer.value = '';
@@ -1780,5 +2100,172 @@ h1 {
   height: 100%;
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, transparent 50%, rgba(0, 191, 255, 0.1) 100%);
   pointer-events: none;
+}
+
+/* --- Video Call Overlay --- */
+.video-call-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.9);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(10px);
+}
+
+.video-container {
+  position: relative;
+  width: 100%;
+  max-width: 600px;
+  aspect-ratio: 1 / 1; /* Square shape as requested */
+  background: #000;
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 0 50px rgba(135, 206, 235, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+/* Main Video fills the container */
+.main-video-wrapper {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.main-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Mirror user camera */
+.user-cam {
+  transform: scaleX(-1);
+}
+
+/* Picture-in-Picture (Small Video) */
+.pip-video-wrapper {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 120px;
+  height: 120px;
+  border-radius: 15px;
+  overflow: hidden;
+  box-shadow: 0 5px 15px rgba(0,0,0,0.5);
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  transition: transform 0.3s;
+  z-index: 10;
+}
+
+.pip-video-wrapper:hover {
+  transform: scale(1.05);
+  border-color: #87ceeb;
+}
+
+.pip-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Controls */
+.video-controls {
+  position: absolute;
+  bottom: 30px;
+  left: 0;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  z-index: 20;
+}
+
+.control-btn {
+  padding: 12px 24px;
+  border-radius: 30px;
+  border: none;
+  background: rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(5px);
+  color: white;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.control-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+  transform: translateY(-2px);
+}
+
+.control-btn.close-btn {
+  background: #ff4757;
+}
+
+.control-btn.close-btn:hover {
+  background: #ff6b81;
+}
+
+.control-btn.off {
+  background: rgba(0, 0, 0, 0.5);
+  color: #aaa;
+}
+
+/* Gesture Toast */
+.gesture-toast {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 0.9rem;
+  pointer-events: none;
+  animation: fadeInOut 3s forwards;
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.vision-status {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #ff4d4f; /* Default red */
+  padding: 5px 10px;
+  border-radius: 15px;
+  font-size: 0.8rem;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  z-index: 10;
+}
+
+.vision-status.active {
+  color: #52c41a; /* Green */
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: currentColor;
+}
+
+@keyframes fadeInOut {
+  0% { opacity: 0; transform: translate(-50%, -10px); }
+  10% { opacity: 1; transform: translate(-50%, 0); }
+  90% { opacity: 1; transform: translate(-50%, 0); }
+  100% { opacity: 0; transform: translate(-50%, -10px); }
 }
 </style>

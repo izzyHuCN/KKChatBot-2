@@ -17,6 +17,9 @@ class AliyunTTSService:
     def get_token(cls) -> Optional[str]:
         """
         获取阿里云NLS访问令牌 (缓存有效)
+        
+        阿里云 NLS 服务需要使用 Token 进行身份验证。
+        Token 有效期通常为 24 小时，因此我们需要缓存它，避免频繁调用 CreateToken 接口。
         """
         # 如果当前token有效且距离过期还有10分钟以上，直接返回
         if cls._token and time.time() < cls._token_expire_time - 600:
@@ -58,6 +61,8 @@ class AliyunTTSService:
     async def synthesize(cls, text: str) -> Optional[bytes]:
         """
         调用阿里云RESTful API进行语音合成
+        
+        使用 httpx 进行异步 HTTP 请求，避免阻塞主线程。
         """
         token = cls.get_token()
         if not token:
@@ -82,10 +87,10 @@ class AliyunTTSService:
             # "voice": "zhiqi", # 暂时使用知琪，比较通用且好听，或者用户指定
             # "voice": "aitong", # 艾彤：儿童音，可爱小朋友的声音
             # "voice": "zhiqi", # 知琪：温柔女声，比较中性
-            "voice": "jielidou", # 杰力豆：治愈童声
+            "voice": "jielidou", # 杰力豆：治愈童声，比较适合“汐宝”这个名字
             "volume": 50,
-            "speech_rate": 0, # 语速 0
-            "pitch_rate": 0 # 语调 0
+            "speech_rate": 0, # 语速 0 (范围 -500 ~ 500)
+            "pitch_rate": 0 # 语调 0 (范围 -500 ~ 500)
         }
 
         try:

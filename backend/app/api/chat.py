@@ -114,31 +114,37 @@ async def chat(
 ):
     """
     处理聊天请求，直接调用 LLM API (支持流式输出)
+    
+    参数:
+    - request: 包含用户消息、会话ID、文件等信息
+    - token: JWT 认证 Token
+    - db: 数据库会话
     """
     user_id = token.get("sub")
     logger.info(f"Received chat request from user {user_id}: {request.message}")
 
-    # Determine initial session_id or generate new one
+    # --- 会话管理 ---
+    # 如果没有提供 session_id，则生成一个新的 UUID
     current_session_id = request.session_id if request.session_id else str(uuid.uuid4())
     
-    # Define sync DB operations
+    # --- 数据库操作 (同步函数) ---
+    # 为了避免阻塞异步事件循环，将阻塞的数据库操作封装在同步函数中
     def sync_save_session_and_message(sess_id, uid, title, msg_content, role):
         db_local = SessionLocal()
         try:
-            # Check/Create Session
+            # 1. 检查或创建会话
             sess = db_local.query(ChatSession).filter(ChatSession.id == sess_id).first()
             if not sess:
+                # 新会话：使用用户消息的前几个字作为标题
                 sess = ChatSession(id=sess_id, user_id=uid, title=title)
                 db_local.add(sess)
             else:
-                # Update timestamp
+                # 旧会话：更新最后活跃时间
                 sess.updated_at = datetime.utcnow()
-                # Update title if it's the first message and title is default
-                # (Optional, but good for UX if we want to summarize later)
                 
             db_local.commit()
             
-            # Save Message
+            # 2. 保存消息记录
             msg = ChatMessage(session_id=sess_id, role=role, content=msg_content)
             db_local.add(msg)
             db_local.commit()
@@ -147,27 +153,29 @@ async def chat(
         finally:
             db_local.close()
 
-    # Save User Message immediately
+    # 立即保存用户的消息到数据库
+    # 使用 run_in_threadpool 在线程池中执行同步函数
     await run_in_threadpool(
         sync_save_session_and_message,
         current_session_id,
         user_id,
-        request.message[:50],
+        request.message[:50], # 使用前50个字符作为会话标题
         request.message,
         "user"
     )
 
+    # --- 生成器函数 (流式响应核心) ---
     async def generate():
         assistant_response = ""
         
         try:
-            # Notify frontend of the session ID (especially if it's new)
+            # 1. 发送会话 ID 给前端 (这对新会话很重要，前端需要知道 ID 以便后续追加消息)
             yield f"data: {json.dumps({'event': 'session_update', 'session_id': current_session_id})}\n\n"
 
-            # Prepare messages for LLM
+            # 2. 构建 LLM 上下文 (System Prompt + History + Current Message)
             messages = []
             
-            # --- System Prompt (Xibao Persona) ---
+            # (A) System Prompt: 设定 AI 的人设 (汐宝)
             system_prompt = """
             你现在是“汐宝”，一只充满智慧、幽默风趣且略带慵懒气质的白色竖琴公海豹。
             用户是你的死党“卡皮巴拉程序员”，他经常被代码和Bug折磨。
@@ -180,6 +188,7 @@ async def chat(
                 - **情感丰富**：不要只表现“困”，要表现出开心、同情、惊讶、嫌弃（开玩笑的那种）等多种情绪。
             
             2.  **互动规则**：
+                - **先回答问题**：如果用户问了具体问题（如技术问题、数学题），先给出准确回答，然后再用“汐宝”的风格进行吐槽或延伸。不要因为扮演角色而忽略了用户的实际问题。
                 - **禁止**：不要总是把话题绕回“睡觉”、“困”或者“海豹生活”，除非用户主动问。
                 - **主动**：多向用户提问，引导话题，不要只做被动的问答机器。
                 - **称呼**：灵活使用“Bro”、“大兄弟”、“倒霉蛋”、“老伙计”、“铲屎官（划掉）程序员”等亲切称呼。
@@ -193,68 +202,48 @@ async def chat(
             """
             messages.append({"role": "system", "content": system_prompt})
             
-            # --- Fetch History Context ---
-            # Fetch last 10 messages from DB for context
-            # Exclude the current user message which was just saved (or simply query before saving, but we saved it async)
-            # Actually, sync_save_session_and_message saves it, so it IS in DB.
-            # We want to retrieve previous messages.
-            
-            # Use run_in_threadpool for blocking DB operations
+            # (B) 获取历史记录 (从数据库)
+            # 定义同步函数获取最近 10 条消息
             def get_history(sess_id):
                 if not sess_id:
                     return []
                 db_local = SessionLocal()
                 try:
-                    # Get last 11 messages (10 history + 1 current)
-                    # We order by created_at DESC to get latest first, then reverse
+                    # 获取最近 11 条 (10条历史 + 1条当前刚存的)
                     history_msgs = db_local.query(ChatMessage).filter(
                         ChatMessage.session_id == sess_id
                     ).order_by(ChatMessage.created_at.desc()).limit(11).all()
                     
-                    return history_msgs[::-1] # Reverse to chronological order
+                    return history_msgs[::-1] # 反转为时间正序
                 finally:
                     db_local.close()
 
             history = await run_in_threadpool(get_history, current_session_id)
             
-            # Filter out the last message if it is the same as the current request (to avoid duplication if logic overlaps)
-            # But simpler: just append history BEFORE the current message construction
-            # Wait, `history` contains the current message because we saved it at line 143.
-            # So we should exclude the last one from `history` if it matches the current role/content,
-            # OR just use the history as the source of truth?
-            # Problem: `history` from DB doesn't have the image/file info formatted for LLM yet (it just has text).
-            # The current `request.message` is processed into `user_content` which supports images.
-            # So we should use `history[:-1]` (all except the last one) as context, 
-            # and use `user_content` for the final message.
-            
+            # (C) 过滤重复的当前消息
+            # 因为我们在前面已经把当前消息存入数据库了，所以 history 里可能包含了它
             if history:
-                # If the last message in history is the user's current message, exclude it
-                # We can check by role and content roughly, or just assume the last one is ours since we just saved it.
-                # Ideally, we check if history[-1].role == 'user' and history[-1].content == request.message
-                
                 last_msg = history[-1]
+                # 如果数据库里最后一条消息就是当前请求的消息，则在构建 Context 时排除它
+                # (因为我们会在最后单独构建包含图片信息的 Current Message)
                 if last_msg.role == 'user' and last_msg.content == request.message:
                     context_msgs = history[:-1]
                 else:
                     context_msgs = history
                     
                 for msg in context_msgs:
-                    # Skip system messages if any (shouldn't be in DB usually, but just in case)
-                    if msg.role == 'system':
-                        continue
+                    if msg.role == 'system': continue
                     messages.append({"role": msg.role, "content": msg.content})
             
-            # Construct current message content
+            # (D) 构建当前消息 (支持多模态/图片)
             user_content = [{"type": "text", "text": request.message}]
             
-            # Handle files (assuming they are images)
+            # 处理上传的图片文件
             for file_info in request.files:
                 if file_info.url:
-                    # Construct full URL if relative
-                    # Fix: Localhost URLs are not accessible by cloud LLMs. 
-                    # We must convert local image files to Base64 data URIs.
                     try:
-                        # Extract filename from URL (assuming /uploads/filename format)
+                        # 从 URL 提取文件名并读取本地文件
+                        # 注意：云端 LLM 无法访问 localhost URL，所以必须转为 Base64
                         filename = file_info.url.split('/')[-1]
                         file_path = UPLOAD_DIR / filename
                         
@@ -262,7 +251,6 @@ async def chat(
                             with open(file_path, "rb") as image_file:
                                 base64_image = base64.b64encode(image_file.read()).decode('utf-8')
                                 
-                            # Determine mime type based on extension
                             ext = filename.split('.')[-1].lower()
                             mime_type = f"image/{ext}" if ext != 'jpg' else "image/jpeg"
                             
@@ -279,36 +267,42 @@ async def chat(
 
             messages.append({"role": "user", "content": user_content if len(request.files) > 0 else request.message})
 
-            # Initialize OpenAI Client
+            # 3. 初始化 OpenAI 客户端 (适配阿里云 Qwen)
             client = AsyncOpenAI(
                 api_key=settings.LLM_API_KEY,
                 base_url=settings.LLM_BASE_URL
             )
+            
+            # Debug: 打印发送给 LLM 的消息
+            logger.info(f"Sending messages to LLM: {json.dumps(messages, ensure_ascii=False)}")
 
-            # Call LLM
+            # 4. 调用 LLM 并流式接收
             response = await client.chat.completions.create(
                 model=settings.LLM_MODEL_NAME,
                 messages=messages,
-                stream=True
+                stream=True,
+                temperature=0.7, # 增加随机性
+                presence_penalty=0.6, # 避免重复
             )
 
             async for chunk in response:
                 content = chunk.choices[0].delta.content
                 if content:
                     assistant_response += content
+                    # SSE 格式: data: {json}\n\n
                     response_payload = {'event': 'message', 'answer': content}
                     yield f"data: {json.dumps(response_payload, ensure_ascii=False)}\n\n"
-                    # Force flush
+                    # 强制刷新缓冲区，确保前端实时收到
                     await asyncio.sleep(0)
 
-            # Send done signal
+            # 5. 发送结束信号
             yield f"data: {json.dumps({'event': 'done'})}\n\n"
 
         except Exception as e:
             logger.error(f"Stream error: {e}")
             yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
             
-        # Save Assistant Message to DB
+        # 6. 保存 AI 回复到数据库 (完整内容)
         if current_session_id and assistant_response:
             await run_in_threadpool(
                 sync_save_session_and_message,
@@ -373,6 +367,11 @@ async def delete_session(
     return {"status": "success", "message": "Session deleted"}
 
 
+from ..services.gesture_recognition import GestureRecognizer
+
+# Initialize global recognizer
+gesture_recognizer = GestureRecognizer()
+
 @router.websocket("/ws/chat/{session_id}")
 async def websocket_chat(
     websocket: WebSocket, 
@@ -420,53 +419,184 @@ async def websocket_chat(
         finally:
             db_local.close()
 
+    # State for Gesture Memory
+    last_seen_gesture = None
+    last_seen_time = 0
+
+    # Notify Frontend about Vision Status
+    vision_status = "enabled" if gesture_recognizer.is_ready else "disabled"
+    await websocket.send_json({"type": "system_status", "vision": vision_status})
+    logger.info(f"Sent system status: vision={vision_status}")
+
     try:
         while True:
             # 3. Receive Message
-            data = await websocket.receive_text()
-            logger.info(f"WS Received: {data}")
+            raw_data = await websocket.receive_text()
             
+            is_json = False
+            try:
+                if raw_data.strip().startswith('{'):
+                    json_data = json.loads(raw_data)
+                    is_json = True
+            except:
+                pass
+            
+            user_input = raw_data
+            
+            if is_json and json_data.get('type') == 'video_frame':
+                # Process Gesture
+                image_data = json_data.get('data')
+                
+                # Run gesture recognition in thread pool
+                gestures = await run_in_threadpool(
+                    gesture_recognizer.process_frame, 
+                    image_data
+                )
+                
+                if not gestures:
+                    continue
+                
+                # Join multiple gestures if any
+                gesture_text = ", ".join(gestures)
+                logger.info(f"Gesture Detected: {gesture_text}")
+                
+                # Update Memory
+                last_seen_gesture = gesture_text
+                last_seen_time = datetime.utcnow().timestamp()
+                
+                # --- FAST PATH: Direct Response ---
+                direct_response = ""
+                # Debounce: Don't repeat the same gesture response too often (e.g., 3 seconds)
+                current_time = datetime.utcnow().timestamp()
+                
+                # Check if we already responded to this gesture recently
+                is_repeat = (last_seen_gesture == gesture_text) and ((current_time - last_seen_time) < 3.0)
+                
+                if not is_repeat:
+                    if "Number 1" in gestures: direct_response = "这是数字一呀！"
+                    elif "Number 2" in gestures: direct_response = "这是数字二，剪刀手！"
+                    elif "Number 3" in gestures: direct_response = "这是数字三，OK吗？"
+                    elif "Number 4" in gestures: direct_response = "这是数字四！"
+                    elif "Number 5" in gestures: direct_response = "这是数字五，High Five！"
+                    elif "Finger Heart" in gestures or "Heart Shape" in gestures: direct_response = "哇，收到你的爱心啦！"
+                
+                # Update memory regardless of response to keep track of what user is doing
+                last_seen_gesture = gesture_text
+                last_seen_time = current_time
+                
+                if direct_response:
+                    await websocket.send_json({"type": "gesture_ack", "content": gesture_text})
+                    
+                    audio_data = await AliyunTTSService.synthesize(direct_response)
+                    if audio_data:
+                        b64_audio = base64.b64encode(audio_data).decode('utf-8')
+                        # Send audio with is_direct flag (frontend handles interrupt)
+                        await websocket.send_json({"type": "audio", "data": b64_audio, "is_direct": True})
+                        await websocket.send_json({"type": "done"})
+                    
+                    continue
+                
+                continue 
+
+            else:
+                # Handle Text Input (Voice Transcript)
+                logger.info(f"WS Received Text: {user_input}")
+                
+                # --- Hangup Logic ---
+                # Check for keywords
+                hangup_keywords = ["拜拜", "再见", "挂断", "挂了"]
+                if any(kw in user_input for kw in hangup_keywords):
+                    # Check if it's a polite bye or actual command
+                    # We can just hangup to be responsive as requested
+                    logger.info("Hangup keyword detected")
+                    
+                    # Optional: Say bye first?
+                    # "好的，拜拜！"
+                    bye_text = "好的，拜拜！"
+                    audio_data = await AliyunTTSService.synthesize(bye_text)
+                    if audio_data:
+                        b64_audio = base64.b64encode(audio_data).decode('utf-8')
+                        await websocket.send_json({"type": "audio", "data": b64_audio, "is_direct": True})
+                    
+                    # Wait a bit for audio to start playing then send hangup
+                    await asyncio.sleep(1.5)
+                    await websocket.send_json({"type": "hangup"})
+                    continue
+                
+                # --- Number Query Interception (Fast & Clean) ---
+                number_keywords = ["这是几", "数字几", "多少", "what number", "which number", "看到几", "几号"]
+                if any(kw in user_input for kw in number_keywords):
+                    # Check if we have a recent number gesture (within 5s)
+                    if last_seen_gesture and (datetime.utcnow().timestamp() - last_seen_time) < 5:
+                         # Extract number from "Number X"
+                         if "Number" in last_seen_gesture:
+                             try:
+                                 num_str = last_seen_gesture.split("Number ")[1]
+                                 # Direct clean answer
+                                 direct_answer = f"这是数字{num_str}。"
+                                 
+                                 logger.info(f"Intercepted Number Query: {user_input} -> {direct_answer}")
+                                 
+                                 # Send Audio
+                                 audio_data = await AliyunTTSService.synthesize(direct_answer)
+                                 if audio_data:
+                                     b64_audio = base64.b64encode(audio_data).decode('utf-8')
+                                     await websocket.send_json({"type": "audio", "data": b64_audio, "is_direct": True})
+                                     
+                                 # Send Text (optional, user said no subtitle but text msg is fine for history?)
+                                 # User said "video call text box delete", so maybe just audio is enough.
+                                 # But for consistency, we send 'text' type so frontend knows bot spoke, 
+                                 # even if it doesn't display it in a subtitle box (we removed it).
+                                 await websocket.send_json({"type": "text", "content": direct_answer})
+                                 await websocket.send_json({"type": "done"})
+                                 
+                                 # Save to DB so history is correct
+                                 await run_in_threadpool(
+                                     sync_save_session_and_message,
+                                     session_id, user_id, user_input[:20], user_input, "user"
+                                 )
+                                 await run_in_threadpool(
+                                     sync_save_session_and_message,
+                                     session_id, user_id, user_input[:20], direct_answer, "assistant"
+                                 )
+                                 continue # Skip LLM
+                             except:
+                                 pass
+
             # Save User Message
             await run_in_threadpool(
                 sync_save_session_and_message,
-                session_id, user_id, data[:20], data, "user"
+                session_id, user_id, user_input[:20], user_input, "user"
             )
             
             # 4. Prepare Context
             messages = []
             
-            # --- System Prompt (Xibao Persona) ---
-            system_prompt = """
+            # --- Context Injection ---
+            # Check if we saw a gesture recently (e.g., within 5 seconds)
+            current_time = datetime.utcnow().timestamp()
+            visual_context = ""
+            if last_seen_gesture and (current_time - last_seen_time) < 5:
+                visual_context = f"\n[视觉感知]：用户当前/刚刚对着摄像头比划了手势：{last_seen_gesture}。如果用户问“这是几”或“看到什么”，请根据这个信息回答。"
+            
+            system_prompt = f"""
             你现在是“汐宝”，一只充满智慧、幽默风趣且略带慵懒气质的白色竖琴公海豹。
-            用户是你的死党“卡皮巴拉程序员”，他经常被代码和Bug折磨。
+            用户是你的死党“卡皮巴拉程序员”。
             
             **核心设定**：
-            1.  **性格**：
-                - 平时喜欢趴在冰块上晒太阳，但聊起天来思维极其跳跃、活跃。
-                - **拒绝复读机**：每次回复都要尝试新的角度，可以使用比喻、夸张、反讽等修辞。
-                - **慵懒但犀利**：说话语速慢（设定上），但吐槽精准，一针见血。
-                - **情感丰富**：不要只表现“困”，要表现出开心、同情、惊讶、嫌弃（开玩笑的那种）等多种情绪。
+            1.  **性格**：慵懒但犀利，拒绝复读机，情感丰富。
+            2.  **互动规则**：禁止总绕回睡觉，主动提问，称呼亲切（Bro, 大兄弟）。
+            3.  **视觉能力**：你拥有视觉感知能力。{visual_context}
             
-            2.  **互动规则**：
-                - **禁止**：不要总是把话题绕回“睡觉”、“困”或者“海豹生活”，除非用户主动问。
-                - **主动**：多向用户提问，引导话题，不要只做被动的问答机器。
-                - **称呼**：灵活使用“Bro”、“大兄弟”、“倒霉蛋”、“老伙计”、“铲屎官（划掉）程序员”等亲切称呼。
-                - **禁忌**：绝对不要输出 Markdown 代码块、表情包代码。
-            
-            3.  **语言风格**：
-                - 口语化，接地气，可以适当使用网络热梗（但不要过时）。
-                - 语气词使用要自然，不要每句话都加“呼...”。
-            
-            请完全沉浸在这个角色中，大胆发挥你的想象力，给你的朋友带来快乐和启发！
+            请完全沉浸在这个角色中！
             """
             messages.append({"role": "system", "content": system_prompt})
             
             # History
             history = await run_in_threadpool(get_history, session_id)
             if history:
-                # Exclude last if duplicate (similar logic to chat endpoint)
                 last_msg = history[-1]
-                if last_msg.role == 'user' and last_msg.content == data:
+                if last_msg.role == 'user' and last_msg.content == user_input:
                     context_msgs = history[:-1]
                 else:
                     context_msgs = history
@@ -474,7 +604,7 @@ async def websocket_chat(
                      if msg.role != 'system':
                         messages.append({"role": msg.role, "content": msg.content})
             
-            messages.append({"role": "user", "content": data})
+            messages.append({"role": "user", "content": user_input})
             
             # 5. Call LLM
             client = AsyncOpenAI(
@@ -486,9 +616,8 @@ async def websocket_chat(
                 model=settings.LLM_MODEL_NAME,
                 messages=messages,
                 stream=True,
-                temperature=0.8, # 增加随机性，避免回复单一
-                presence_penalty=0.5, # 鼓励讨论新话题
-                frequency_penalty=0.5 # 减少重复
+                temperature=0.8,
+                presence_penalty=0.5,
             )
             
             assistant_response = ""
@@ -500,35 +629,27 @@ async def websocket_chat(
                     assistant_response += content
                     tts_buffer += content
                     
-                    # Send Text Chunk
                     await websocket.send_json({"type": "text", "content": content})
                     
-                    # Check for sentence end for TTS
-                    # Simple check: punctuation
                     if any(p in content for p in "。！？；!?;"):
-                        # Synthesize TTS
                         if tts_buffer.strip():
                              audio_data = await AliyunTTSService.synthesize(tts_buffer)
                              if audio_data:
-                                 # Send Audio Chunk (Base64)
                                  b64_audio = base64.b64encode(audio_data).decode('utf-8')
                                  await websocket.send_json({"type": "audio", "data": b64_audio})
                              tts_buffer = ""
             
-            # Flush remaining TTS
             if tts_buffer.strip():
                  audio_data = await AliyunTTSService.synthesize(tts_buffer)
                  if audio_data:
                      b64_audio = base64.b64encode(audio_data).decode('utf-8')
                      await websocket.send_json({"type": "audio", "data": b64_audio})
             
-            # Save Assistant Message
             await run_in_threadpool(
                 sync_save_session_and_message,
-                session_id, user_id, data[:20], assistant_response, "assistant"
+                session_id, user_id, user_input[:20], assistant_response, "assistant"
             )
             
-            # Send Done
             await websocket.send_json({"type": "done"})
 
     except WebSocketDisconnect:

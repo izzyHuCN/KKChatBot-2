@@ -1,6 +1,9 @@
 import axios from 'axios'
 
-const API_BASE_URL = '' // Empty string to use relative path for proxy
+// API 基础路径
+// 在开发环境中 (vite.config.js) 配置了代理，将 /api 转发到 localhost:8000
+// 生产环境应指向实际的后端域名
+const API_BASE_URL = '' 
 
 
 const api = axios.create({
@@ -11,7 +14,8 @@ const api = axios.create({
   }
 })
 
-// 请求拦截器
+// --- 请求拦截器 ---
+// 在发送请求前自动附加 JWT Token
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('access_token')
@@ -25,10 +29,12 @@ api.interceptors.request.use(
   }
 )
 
-// 响应拦截器
+// --- 响应拦截器 ---
+// 统一处理响应数据和认证错误
 api.interceptors.response.use(
   (response) => response.data,
   (error) => {
+    // 401/403 表示 Token 过期或无效，强制跳转登录页
     if (error.response?.status === 401 || error.response?.status === 403) {
       localStorage.removeItem('access_token')
       window.location.href = '/login'
@@ -38,9 +44,9 @@ api.interceptors.response.use(
 )
 
 export default {
-  // 认证相关
+  // --- 认证相关 ---
   login: (credentials) => {
-    // 将JSON转换为URL编码格式
+    // FastAPI OAuth2PasswordRequestForm 需要 x-www-form-urlencoded 格式
     const formData = new URLSearchParams();
     formData.append('username', credentials.username);
     formData.append('password', credentials.password);
@@ -52,15 +58,23 @@ export default {
   },
   register: (userData) => api.post('/auth/register', userData),
 
-  // 聊天相关
+  // --- 聊天相关 ---
   sendMessage: (data) => api.post('/api/chat', data),
   
-  // 流式聊天 (SSE)
-  // 返回一个 Promise，该 Promise 在流开始时解决，并提供一个回调函数来接收数据
+  /**
+   * 流式聊天 (SSE - Server-Sent Events)
+   * 
+   * @param {Object} data - 请求数据 { message: "hello", session_id: "...", files: [...] }
+   * @param {Function} onMessage - 接收到文本片段时的回调
+   * @param {Function} onDone - 流结束时的回调
+   * @param {Function} onError - 出错时的回调
+   * @param {Object} options - 额外选项，如 { signal: AbortSignal } 用于取消请求
+   */
   streamChat: async (data, onMessage, onDone, onError, options = {}) => {
     const token = localStorage.getItem('access_token');
     
     try {
+      // 使用 fetch API 以便处理流式响应 (axios 对流的支持不如 fetch 原生)
       const response = await fetch(`${API_BASE_URL}/api/chat`, {
         method: 'POST',
         headers: {
@@ -68,13 +82,14 @@ export default {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify(data),
-        signal: options.signal // 支持 AbortController
+        signal: options.signal // 支持 AbortController 打断请求
       });
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
+      // 获取 ReadableStream
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -83,14 +98,15 @@ export default {
         const { value, done } = await reader.read();
         if (done) break;
         
+        // 解码二进制流为文本
         const chunk = decoder.decode(value, { stream: true });
         buffer += chunk;
         
+        // 处理可能粘连的数据块 (SSE 格式: data: {...}\n\n)
         const lines = buffer.split('\n\n');
         buffer = lines.pop(); // 保留最后一个不完整的块
         
         for (const line of lines) {
-          // console.log('[SSE RAW]', line); // 打印原始行
           if (line.trim().startsWith('data:')) {
             try {
               const jsonStr = line.substring(line.indexOf('data:') + 5).trim();
@@ -98,26 +114,22 @@ export default {
               if (!jsonStr) continue;
               
               const eventData = JSON.parse(jsonStr);
-              // console.log('[SSE Parsed]', eventData); // 打印解析后的对象
               
+              // 根据事件类型分发处理
               if (eventData.event === 'message') {
                 if (eventData.answer) {
                     onMessage(eventData.answer);
-                } else {
-                    console.warn('[SSE Warning] Empty answer in message event', eventData);
                 }
               } else if (eventData.event === 'session_update') {
+                // 后端通知更新 session_id (特别是新会话创建时)
                 if (onMessage.onSessionUpdate) {
                     onMessage.onSessionUpdate(eventData.session_id);
                 }
               } else if (eventData.event === 'done') {
-                // console.log('[SSE] Stream done');
                 if (onDone) onDone();
               } else if (eventData.event === 'error') {
                 console.error('[SSE Error]', eventData.message);
                 if (onError) onError(eventData.message);
-              } else {
-                // console.log('[SSE] Unhandled event type:', eventData.event);
               }
             } catch (e) {
               console.warn('Failed to parse SSE event:', e, line);
@@ -134,19 +146,17 @@ export default {
   getMessages: (sessionId) => api.get(`/api/messages/${sessionId}`),
   deleteSession: (sessionId) => api.delete(`/api/sessions/${sessionId}`),
   
-  // 文件上传
+  // --- 文件上传 ---
   uploadFile: (formData) => api.post('/api/upload', formData, {
     headers: {
       'Content-Type': 'multipart/form-data'
     }
   }),
 
-  // 文本转语音
+  // --- 文本转语音 (TTS) ---
   getTTS: async (text) => {
     try {
-        // 直接使用 axios 实例发送请求
-        // 注意：这里的拦截器会返回 response.data
-        // 当 responseType 为 'blob' 时，response.data 就是 Blob 对象
+        // 请求返回的是二进制音频流 (Blob)
         return await api.post('/api/tts', { text }, {
           responseType: 'blob' 
         });

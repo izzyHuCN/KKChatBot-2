@@ -1,13 +1,20 @@
-FROM python:3.9-slim
+FROM python:3.9
 
 WORKDIR /app
 
 # Install system dependencies
+# Even with full image, we install these to be safe for opencv-headless and mediapipe
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    default-libmysqlclient-dev \
     pkg-config \
+    libgl1 \
+    libglib2.0-0 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Fix for MediaPipe on slim images (sometimes needs protobuf manually or specific versions)
+# But mainly, we ensure numpy is compatible.
+
 
 # Copy requirements and install
 COPY requirements.txt .

@@ -1,28 +1,7 @@
 version: '3.8'
 
 services:
-  # MySQL数据库
-  mysql:
-    image: mysql:8.0
-    container_name: ai-chat-mysql
-    environment:
-      MYSQL_ROOT_PASSWORD: 123456
-      MYSQL_DATABASE: ai_chat
-      MYSQL_USER: aichat
-      MYSQL_PASSWORD: aichatpassword
-    ports:
-      - "3307:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-    networks:
-      - ai-chat-network
-    healthcheck:
-      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
-      timeout: 20s
-      retries: 10
-
-  # Redis缓存
+  # Redis缓存 (保留，用于限流)
   redis:
     image: redis:7-alpine
     container_name: ai-chat-redis
@@ -38,30 +17,35 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=mysql+pymysql://aichat:aichatpassword@mysql:3306/ai_chat
-      - REDIS_URL=redis://redis:6379/0
-      # 强制指定 Dify 配置 (使用 80 端口，对应 Nginx)
-      - DIFY_API_KEY=app-eruXC70ovNO9aRhbbrNUiGYm
-      - DIFY_BASE_URL=http://127.0.0.1/v1
-      - SECRET_KEY=your-secret-key-change-in-production
+      # 强制使用 SQLite (默认配置)，覆盖任何可能的 MySQL 配置
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      
+      # 核心密钥配置
+      - SECRET_KEY=${SECRET_KEY}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_MODEL_NAME=${LLM_MODEL_NAME}
+      
+      # 阿里云 TTS 配置
+      - ALIYUN_NLS_APP_KEY=${ALIYUN_NLS_APP_KEY}
+      - ALIYUN_ACCESS_KEY_ID=${ALIYUN_ACCESS_KEY_ID}
+      - ALIYUN_ACCESS_KEY_SECRET=${ALIYUN_ACCESS_KEY_SECRET}
+      
     volumes:
       - ./backend:/app
     depends_on:
-      mysql:
-        condition: service_healthy
       redis:
         condition: service_started
     networks:
       - ai-chat-network
 
-  # Vue前端
+  # Vue前端 (Nginx)
   frontend:
     build: ./frontend
     container_name: ai-chat-frontend
     ports:
-      - "3000:80"
-    environment:
-      - VITE_API_BASE_URL=http://localhost:8000
+      - "3000:80" # 映射到主机的 3000 端口
     depends_on:
       - backend
     networks:
@@ -70,6 +54,3 @@ services:
 networks:
   ai-chat-network:
     driver: bridge
-
-volumes:
-  mysql_data:
