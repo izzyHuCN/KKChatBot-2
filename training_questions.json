@@ -1,0 +1,63 @@
+
+[
+  {
+    "category": "Python 基础",
+    "question": "Python 中的列表（List）和元组（Tuple）有什么主要区别？"
+  },
+  {
+    "category": "Python 基础",
+    "question": "解释一下 Python 中的装饰器（Decorator）是什么，并给出一个简单的例子。"
+  },
+  {
+    "category": "Python 基础",
+    "question": "如何在 Python 中进行异常处理？try-except-else-finally 结构是如何工作的？"
+  },
+  {
+    "category": "Web 开发",
+    "question": "什么是 RESTful API？它的主要设计原则有哪些？"
+  },
+  {
+    "category": "Web 开发",
+    "question": "HTTP 协议中的 GET 和 POST 请求有什么区别？"
+  },
+  {
+    "category": "Web 开发",
+    "question": "解释一下 CSRF（跨站请求伪造）攻击的原理以及如何防御。"
+  },
+  {
+    "category": "数据库",
+    "question": "关系型数据库（如 MySQL）和非关系型数据库（如 MongoDB）的主要区别是什么？"
+  },
+  {
+    "category": "数据库",
+    "question": "什么是 SQL 注入？如何防止它？"
+  },
+  {
+    "category": "算法与数据结构",
+    "question": "简述快速排序（Quick Sort）的算法原理和时间复杂度。"
+  },
+  {
+    "category": "算法与数据结构",
+    "question": "什么是哈希表（Hash Table）？它是如何解决冲突的？"
+  },
+  {
+    "category": "人工智能",
+    "question": "什么是大语言模型（LLM）？它们是如何被训练出来的？"
+  },
+  {
+    "category": "人工智能",
+    "question": "解释一下 Transformer 架构中的注意力机制（Attention Mechanism）。"
+  },
+  {
+    "category": "系统设计",
+    "question": "在设计高并发系统时，通常会采用哪些策略（如缓存、负载均衡等）？"
+  },
+  {
+    "category": "DevOps",
+    "question": "Docker 和虚拟机（VM）有什么区别？"
+  },
+  {
+    "category": "DevOps",
+    "question": "什么是 CI/CD（持续集成/持续部署）？它有什么好处？"
+  }
+]

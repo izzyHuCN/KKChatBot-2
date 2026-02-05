@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from .config import settings
 from .database import engine, Base
 # from .middleware.rate_limit import rate_limit_middleware
-from .api import chat, auth
+from .api import chat, auth, learning
 
 # --- 生命周期管理器 ---
 # 用于在应用启动和关闭时执行特定逻辑
@@ -50,6 +50,8 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 app.include_router(auth.router, prefix="/auth", tags=["authentication"])
 # chat.router: 处理对话、语音、WebSocket
 app.include_router(chat.router, prefix="/api", tags=["chat"])
+# learning.router: 学习分析
+app.include_router(learning.router, prefix="/api/learning", tags=["learning"])
 
 @app.get("/")
 async def root():

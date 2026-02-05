@@ -64,7 +64,7 @@ export default {
   /**
    * 流式聊天 (SSE - Server-Sent Events)
    * 
-   * @param {Object} data - 请求数据 { message: "hello", session_id: "...", files: [...] }
+   * @param {Object} data - 请求数据 { message: "hello", session_id: "...", files: [...], mode: "casual" }
    * @param {Function} onMessage - 接收到文本片段时的回调
    * @param {Function} onDone - 流结束时的回调
    * @param {Function} onError - 出错时的回调
@@ -142,7 +142,7 @@ export default {
     }
   },
 
-  getSessions: () => api.get('/api/sessions'),
+  getSessions: (mode = 'casual') => api.get(`/api/sessions?mode=${mode}`),
   getMessages: (sessionId) => api.get(`/api/messages/${sessionId}`),
   deleteSession: (sessionId) => api.delete(`/api/sessions/${sessionId}`),
   
@@ -164,5 +164,10 @@ export default {
         console.error("API Error in getTTS:", error);
         throw error;
     }
-  }
+  },
+
+  // --- Learning Dashboard ---
+  getDashboardData: () => api.get('/api/learning/dashboard'),
+  analyzeLearning: () => api.post('/api/learning/analyze'),
+  trackEvent: (data) => api.post('/api/learning/track', data)
 }

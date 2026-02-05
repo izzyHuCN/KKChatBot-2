@@ -1,11 +1,16 @@
 <template>
-  <div class="chat-container">
-    <!-- 动态背景 -->
-    <div class="ocean-bg">
+  <div class="chat-container" :class="{ 'learning-mode': isProfessionalMode }">
+    <!-- 动态背景 (Casual) -->
+    <div class="ocean-bg" v-if="!isProfessionalMode">
       <div class="bubble-1"></div>
       <div class="bubble-2"></div>
       <div class="bubble-3"></div>
       <div class="wave"></div>
+    </div>
+    
+    <!-- 动态背景 (Learning) -->
+    <div class="tech-bg" v-else>
+       <!-- Tech particles or grid can be added here if needed, currently just CSS gradient -->
     </div>
     
     <!-- 视频数字人 (MP4) -->
@@ -38,6 +43,9 @@
         <button class="new-chat-btn" @click="startNewChat">
           + 新建对话
         </button>
+        <button class="new-chat-btn" style="margin-top: 10px; background-color: #67c23a;" @click="$router.push('/dashboard')">
+          📊 学习数据看板
+        </button>
       </div>
       <div class="sidebar-content">
         <div 
@@ -58,7 +66,15 @@
     <div v-if="isSidebarOpen" class="overlay" @click="isSidebarOpen = false"></div>
 
     <!-- Background Music -->
-    <audio ref="bgmAudio" src="/avatars/xibao_bgm.mp3" loop></audio>
+    <audio ref="bgmAudioRef" src="/avatars/xibao_bgm.mp3" loop></audio>
+    
+    <!-- 全屏过渡遮罩 -->
+    <transition name="fade-overlay">
+      <div v-if="isTransitioning" class="transition-overlay"></div>
+    </transition>
+
+    <!-- 学习模式切换按钮 (Header 下方悬浮) -->
+    <!-- Removed from here to move to input area -->
 
     <div class="chat-header">
       <!-- 侧边栏切换按钮 -->
@@ -123,6 +139,16 @@
       </div>
 
       <div class="input-wrapper glass-panel">
+        <!-- 模式切换按钮 (嵌入输入框左侧) -->
+        <button 
+          class="action-btn mode-toggle-btn" 
+          :class="{ 'burn-out': isProfessionalMode }"
+          @click="toggleMode"
+          :title="isProfessionalMode ? '回笼觉模式' : '学习模式'"
+        >
+          <span>{{ isProfessionalMode ? '💤' : '🎓' }}</span>
+        </button>
+
         <!-- 文件上传 -->
         <input type="file" ref="fileInput" @change="handleFileUpload" style="display: none" />
         <button class="action-btn" @click="$refs.fileInput.click()" title="上传文件" :disabled="loading">
@@ -213,6 +239,9 @@
         
         <!-- Controls -->
         <div class="video-controls">
+            <button class="control-btn" @click="toggleMic" :class="{ off: !isMicOn }">
+                {{ isMicOn ? '🎤 On' : '🎤 Off' }}
+            </button>
             <button class="control-btn" @click="toggleCamera" :class="{ off: !isCameraOn }">
                 {{ isCameraOn ? '📷 On' : '📷 Off' }}
             </button>
@@ -248,6 +277,7 @@ const videoPaths = {
 const isVideoCallMode = ref(false);
 const isUserMain = ref(false); // Default: Bot is main
 const isCameraOn = ref(true);
+const isMicOn = ref(true); // Default Mic is On
 const localStream = ref(null);
 const mainUserVideo = ref(null);
 const pipUserVideo = ref(null);
@@ -260,11 +290,21 @@ const toggleVideoCallMode = async () => {
     if (isVideoCallMode.value) {
         stopVideoCall();
     } else {
+        // Explicitly pause BGM BEFORE starting call
+        if (bgmAudioRef.value) {
+             console.log("Explicitly pausing BGM for Video Call");
+             bgmAudioRef.value.pause();
+        }
         await startVideoCall();
     }
 };
 
 const startVideoCall = async () => {
+    // Force pause again to be safe
+    if (bgmAudioRef.value) {
+         bgmAudioRef.value.pause();
+    }
+
     // Start Real-time audio first (reusing existing logic)
     if (!isRealTimeMode.value) {
         // Ensure we enable audio recording for speech recognition
@@ -286,6 +326,7 @@ const startVideoCall = async () => {
     
     isVideoCallMode.value = true;
     isCameraOn.value = true;
+    isMicOn.value = true; // Reset Mic to On when starting call
     
     await nextTick(); // Wait for DOM
     await startCamera();
@@ -329,6 +370,19 @@ const toggleCamera = async () => {
     } else {
         isCameraOn.value = true;
         await startCamera();
+    }
+};
+
+const toggleMic = () => {
+    isMicOn.value = !isMicOn.value;
+    if (isMicOn.value) {
+        // Unmute: Restart recognition if it was stopped or just rely on onend
+        if (isRealTimeMode.value && !recognition) {
+             startRecording();
+        }
+    } else {
+        // Mute: Stop recognition
+        stopRecording();
     }
 };
 
@@ -385,6 +439,15 @@ const sendFrame = () => {
 
 
 const mainAvatarSource = computed(() => {
+  // 学习模式强制使用学习视频 (无论是待机、说话还是思考，除非有特定的学习状态视频)
+  // 用户反馈"回笼觉模式还是没有换到新的数字人形象"，说明切回日常模式时有问题。
+  // 下面的逻辑：如果 isProfessionalMode 为 true，返回 studying；否则走原有逻辑。
+  
+  if (isProfessionalMode.value) {
+      return '/avatars/xibao_studying.mp4';
+  }
+
+  // 正常模式逻辑
   if (isPlayingAudio.value && !isVideoCallMode.value) {
     return videoPaths.talking;
   }
@@ -415,9 +478,8 @@ const attachedFiles = ref([]); // 存储已上传但未发送的文件信息
 const ttsBuffer = ref(''); // 用于流式语音播放的缓冲
 const ignoreWSAudio = ref(false); // 用于在打断后忽略旧的 WebSocket 音频片段
 
-const avatarVideo = ref(null);
 const avatarWrapper = ref(null);
-const bgmAudio = ref(null);
+// const bgmAudio = ref(null); // Removed: Use bgmAudioRef instead
 
 // --- Draggable Logic ---
 const avatarX = ref(20);
@@ -484,6 +546,68 @@ const defaultBotAvatar = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3
 const userAvatar = '/avatars/user.jpg';
 const botAvatar = '/avatars/xibao.jpg';
 
+const isProfessionalMode = ref(false);
+const bgmAudioRef = ref(null); 
+const isTransitioning = ref(false);
+const avatarVideo = ref(null);
+
+const toggleMode = async () => {
+    // 触发过渡动画
+    isTransitioning.value = true;
+    
+    // 等待遮罩层完全覆盖 (300ms)
+    await new Promise(r => setTimeout(r, 300));
+
+    isProfessionalMode.value = !isProfessionalMode.value;
+    
+    if (isProfessionalMode.value) {
+        // --- 进入学习模式 ---
+        // 1. 切换视频源 (由 computed mainAvatarSource 自动处理，这里只需触发响应式更新)
+        // mainAvatarSource.value = ... (Removed, using computed)
+        
+        // 2. 暂停 BGM
+        if (bgmAudioRef.value) {
+            bgmAudioRef.value.pause();
+        }
+        
+        // 3. 无需 Alert，过渡效果本身就是提示
+        
+    } else {
+        // --- 退出学习模式 (回笼觉) ---
+        // 1. 切换回日常视频 (由 computed mainAvatarSource 自动处理)
+        
+        // 2. 恢复 BGM
+        startBGM();
+    }
+
+    // 强制刷新视频加载 (关键：确保 video 标签感知到 src 变化并重载)
+    await nextTick();
+    if (avatarVideo.value) {
+        avatarVideo.value.load();
+        // 自动播放可能被浏览器阻止，但在用户交互后通常允许
+        const playPromise = avatarVideo.value.play();
+        if (playPromise !== undefined) {
+            playPromise.catch(e => console.log("Video autoplay failed:", e));
+        }
+    }
+    
+    // 4. 切换模式后，自动开始新对话
+    await startNewChat();
+    
+    // 5. 刷新会话列表
+    await fetchSessions();
+
+    // 动画结束，移除遮罩 (再等 300ms 让用户看到新界面)
+    setTimeout(() => {
+        isTransitioning.value = false;
+    }, 300);
+};
+
+// Deprecated old handler
+const handleModeChange = (val) => {
+    // ... logic moved to toggleMode
+};
+
 const handleAvatarError = (event, type) => {
     // 避免无限循环
     const fallback = type === 'user' ? defaultUserAvatar : defaultBotAvatar;
@@ -504,18 +628,24 @@ const toggleSidebar = () => {
 
 const fetchSessions = async () => {
     try {
-        const response = await api.getSessions();
+        const mode = isProfessionalMode.value ? 'professional' : 'casual';
+        const response = await api.getSessions(mode);
         sessions.value = response;
     } catch (error) {
         console.error("Failed to fetch sessions:", error);
     }
 };
 
-const startNewChat = () => {
+const startNewChat = async () => {
     currentSessionId.value = '';
-    messages.value = [
-        { role: 'assistant', content: '(～﹃～)~zZ' }
-    ];
+    
+    // Set initial greeting based on mode
+    if (isProfessionalMode.value) {
+         messages.value = [{ role: 'assistant', content: '您好，我是您的专属AI导师。请问有什么技术难题需要探讨？' }];
+    } else {
+         messages.value = [{ role: 'assistant', content: '(～﹃～)~zZ' }];
+    }
+
     stopAllAudio(); // 停止语音
     if (abortController.value) { // 停止请求
         abortController.value.abort();
@@ -586,35 +716,69 @@ const formatTime = (date) => {
 };
 
 // --- BGM Control ---
-const playBGM = () => {
-    if (bgmAudio.value) {
-        bgmAudio.value.volume = 0.2; // Set low volume for background
-        bgmAudio.value.play().catch(e => {
-            console.log("Autoplay prevented, waiting for user interaction");
-            // Add one-time click listener to start BGM
-            const startOnInteraction = () => {
-                if (bgmAudio.value && !isVideoCallMode.value) {
-                    bgmAudio.value.play();
-                }
-                document.removeEventListener('click', startOnInteraction);
-            };
-            document.addEventListener('click', startOnInteraction);
-        });
+// New simplified and robust BGM logic
+const startBGM = async () => {
+    if (!bgmAudioRef.value) return;
+    
+    // Set volume strictly (try 0.2 for safety)
+    bgmAudioRef.value.volume = 0.2; 
+    console.log("BGM Volume set to 0.2 (20%)");
+    
+    if (isVideoCallMode.value || isProfessionalMode.value) {
+        console.log("Skipping BGM start due to mode restriction");
+        return;
+    }
+    
+    try {
+        await bgmAudioRef.value.play();
+        console.log("BGM started successfully");
+    } catch (e) {
+        console.log("BGM play failed (likely autoplay policy):", e);
+        // Add one-time global listener to unlock audio
+        const unlockAudio = () => {
+            if (bgmAudioRef.value) {
+                bgmAudioRef.value.volume = 0.2;
+                bgmAudioRef.value.play().catch(e => console.log("Unlock failed:", e));
+            }
+            document.removeEventListener('click', unlockAudio);
+            document.removeEventListener('touchstart', unlockAudio);
+            document.removeEventListener('keydown', unlockAudio);
+        };
+        
+        document.addEventListener('click', unlockAudio);
+        document.addEventListener('touchstart', unlockAudio);
+        document.addEventListener('keydown', unlockAudio);
     }
 };
 
+const playBGM = () => {
+   // Legacy alias, redirect to startBGM
+   startBGM();
+};
+
 const pauseBGM = () => {
-    if (bgmAudio.value) {
-        bgmAudio.value.pause();
+    if (bgmAudioRef.value) {
+        bgmAudioRef.value.pause();
     }
 };
 
 // Watch video call mode to toggle BGM
 watch(isVideoCallMode, (newVal) => {
     if (newVal) {
-        pauseBGM();
+        // Video Call Started -> Pause BGM
+        if (bgmAudioRef.value) {
+            console.log("Watch: Video Call Started, pausing BGM");
+            bgmAudioRef.value.pause();
+        }
     } else {
-        playBGM();
+        // Video Call Ended -> Resume BGM (only if in casual mode)
+        // Wait a bit to ensure resources are freed
+        setTimeout(() => {
+            if (bgmAudioRef.value && !isProfessionalMode.value) {
+                // Use startBGM to ensure volume and checks
+                startBGM();
+            }
+        }, 500);
     }
 });
 
@@ -627,7 +791,10 @@ onMounted(() => {
   scrollToBottom();
 
   // Start BGM
-  playBGM();
+  // Use a small timeout to ensure DOM is fully ready
+  setTimeout(() => {
+     startBGM();
+  }, 500);
 });
 
 // Scroll to bottom
@@ -952,8 +1119,8 @@ const startRecording = async () => {
   };
 
   recognition.onend = () => {
-    if (isRealTimeMode.value) {
-        // 实时模式下，语音识别结束后自动重启，实现“永远在线”的听觉
+    if (isRealTimeMode.value && isMicOn.value) {
+        // 实时模式下且麦克风未静音，语音识别结束后自动重启，实现“永远在线”的听觉
         try {
             recognition.start();
         } catch (e) {
@@ -1378,13 +1545,14 @@ const sendMessage = async () => {
 
   try {
     await api.streamChat(
-      { 
-        message: content, 
-        stream: true,
-        session_id: currentSessionId.value, // 传递 session_id
-        files: filesToSend // 传递附件
-      }, 
-      onMessage, 
+        { 
+          message: content, 
+          stream: true,
+          session_id: currentSessionId.value, // 传递 session_id
+          files: filesToSend, // 传递附件
+          mode: isProfessionalMode.value ? 'professional' : 'casual' // 传递模式
+        }, 
+        onMessage, 
       onDone, 
       onError,
       { signal: abortController.value.signal } // 传递 signal
@@ -2268,4 +2436,85 @@ h1 {
   90% { opacity: 1; transform: translate(-50%, 0); }
   100% { opacity: 0; transform: translate(-50%, -10px); }
 }
+  /* --- Learning Mode Styles --- */
+  .chat-container.learning-mode {
+      background: #0f0c29;  /* fallback for old browsers */
+      background: -webkit-linear-gradient(to right, #24243e, #302b63, #0f0c29);  /* Chrome 10-25, Safari 5.1-6 */
+      background: linear-gradient(to right, #24243e, #302b63, #0f0c29); /* W3C, IE 10+/ Edge, Firefox 16+, Chrome 26+, Opera 12+, Safari 7+ */
+  }
+
+  /* Hide Ocean elements in learning mode */
+  .learning-mode .ocean-bg {
+      display: none;
+  }
+  
+  /* Removed old Mode Switch Button Styles */
+  /* .mode-switch-wrapper, .mode-fab, .mode-icon, .mode-label styles removed */
+
+  /* Mode Toggle Button in Input Area */
+  .mode-toggle-btn {
+      font-size: 1.4rem;
+      background: linear-gradient(135deg, #e0ffff 0%, #ffffff 100%);
+      border: 2px solid #e0ffff;
+  }
+  
+  .mode-toggle-btn:hover {
+      background: linear-gradient(135deg, #87ceeb 0%, #4682b4 100%);
+      color: white;
+      border-color: #87ceeb;
+  }
+
+  .mode-toggle-btn.burn-out {
+      /* 回笼觉模式样式 (当前是学习模式，显示睡觉图标) */
+      color: #764ba2;
+  }
+  
+  .mode-toggle-btn.burn-out:hover {
+       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+       color: white;
+  }
+
+  /* Transition Overlay */
+  .transition-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: #000;
+      z-index: 9999;
+      pointer-events: none;
+  }
+
+  .fade-overlay-enter-active,
+  .fade-overlay-leave-active {
+      transition: opacity 0.3s ease;
+  }
+
+  .fade-overlay-enter-from,
+  .fade-overlay-leave-to {
+      opacity: 0;
+  }
+
+  /* Tech Style Inputs in Learning Mode */
+  .learning-mode .input-wrapper {
+      background: rgba(16, 20, 30, 0.85);
+      border: 1px solid rgba(100, 200, 255, 0.2);
+      box-shadow: 0 -5px 20px rgba(0,0,0,0.3);
+  }
+
+  .learning-mode .tech-input {
+      color: #e0f7fa;
+  }
+  
+  .learning-mode .message-wrapper.user .bubble {
+      background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+      color: #fff;
+  }
+  
+  .learning-mode .message-wrapper.assistant .bubble {
+      background: rgba(255, 255, 255, 0.1);
+      color: #e0e0e0;
+      border: 1px solid rgba(255,255,255,0.1);
+  }
 </style>

@@ -21,6 +21,7 @@ class ChatSession(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(Integer, index=True)
     title = Column(String(255))
+    mode = Column(String(20), default="casual") # casual, learning
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -33,4 +34,15 @@ class ChatMessage(Base):
     role = Column(String(20))  # user, assistant, system
     content = Column(Text)
     tokens = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LearningRecord(Base):
+    __tablename__ = "learning_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True)
+    event_type = Column(String(50))  # login, quiz_result, question_asked, page_view
+    content = Column(Text, nullable=True) # JSON or text details
+    score = Column(Integer, nullable=True) # For numeric tracking
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -10,11 +10,12 @@ KKChatBot-2 是一个基于 Vue 3 (前端) 和 FastAPI (后端) 构建的现代�
 *   **极速响应 (Fast Path)**: 针对特定手势（如数字），后端直接拦截并毫秒级响应，无需等待大模型。
 *   **多模态融合**: 视觉记忆与语言模型结合，支持“这是几？”等需要视觉上下文的自然问答。
 *   **智能打断与挂断**: 支持语音/手势随时打断 AI 发言，支持“拜拜”语音自动挂断。
+*   **学习数据看板**: 可视化展示用户的学习进度、提问统计及最近的学习活动。
 
 ## 2. 系统架构
 
 ### 2.1 技术栈
-*   **前端**: Vue 3, Vite, Axios, WebSocket (原生), CSS3 Animations
+*   **前端**: Vue 3, Vite, Axios, WebSocket (原生), CSS3 Animations, ECharts (数据可视化)
 *   **后端**: Python 3.9 (Full Image), FastAPI, Uvicorn, SQLAlchemy (SQLite), Redis (可选)
 *   **AI 服务**: 阿里云通义千问 (Qwen-VL-Max) 用于 LLM, 阿里云 NLS 用于 TTS (语音合成)
 *   **计算机视觉**: `MediaPipe Hands` (Google), `OpenCV` (Headless)
@@ -29,6 +30,7 @@ graph TD
     
     subgraph Frontend_App [前端应用]
         UI[界面组件 ChatView]
+        Dashboard[数据看板 DashboardView]
         WS_Client[WebSocket 客户端]
         Camera[摄像头流处理]
         Gesture_UI[视觉状态/字幕]
@@ -42,6 +44,7 @@ graph TD
         CV_Worker[手势识别线程池]
         Fast_Path[极速响应拦截器]
         Chat_Service[聊天业务逻辑]
+        Learning_Service[学习记录服务]
         TTS_Service[阿里云 TTS 服务]
     end
     
@@ -50,6 +53,7 @@ graph TD
     Fast_Path -->|直接回复| TTS_Service
     Fast_Path -->|视觉记忆| Chat_Service
     Chat_Service -->|流式对话| LLM[阿里云 Qwen-VL]
+    Chat_Service -->|记录数据| Learning_Service
     Chat_Service -->|语音合成| TTS[阿里云 NLS]
 ```
 
@@ -120,6 +124,9 @@ sequenceDiagram
     *   **视觉记忆 (Visual Memory)**: 缓存最近一次识别到的手势及其时间戳（有效期 5 秒），用于辅助回答“这是什么”等代词问题。
     *   **防抖动 (Debounce)**: 对连续相同的手势响应设置 3 秒冷却时间，防止 AI 变身复读机。
 
+*   **学习记录 (`backend/app/api/learning.py`)**:
+    *   **数据追踪**: 自动记录用户的提问时间、内容类型，用于生成学习报告。
+
 ### 3.2 前端 (Frontend)
 
 *   **视频通话视图 (`frontend/src/views/ChatView.vue`)**:
@@ -129,7 +136,14 @@ sequenceDiagram
         *   `Sleeping` (常态): 汐宝睡觉。
         *   `Thinking` (视频中默认): 汐宝倾听/思考。
         *   `Talking` (回答中): 汐宝说话。
+        *   `Studying` (学习模式): 汐宝专注学习。
     *   **无感传输**: 视频帧经过压缩后通过 WebSocket 传输，保证低带宽下的流畅度。
+    *   **音频控制**: 
+        *   **BGM 智能管理**: 视频通话时自动静音背景音乐，通话结束自动恢复。
+        *   **麦克风静音**: 支持通话中一键关闭麦克风。
+
+*   **数据看板视图 (`frontend/src/views/DashboardView.vue`)**:
+    *   集成 ECharts 图表，展示每日提问趋势、累计学习时长及最近的活跃记录。
 
 ## 4. 功能使用指南
 
@@ -143,9 +157,14 @@ sequenceDiagram
 *   **特殊手势**: 比个“爱心”或“比心”，汐宝会有惊喜反应。
 *   **组合问答**: 一边比划一边问“这是几？”，汐宝会根据看到的画面回答。
 
-### 4.3 语音控制
+### 4.3 语音控制与设置
 *   **打断**: 汐宝说话时，你只需开口说话或做新手势，它会立即停止当前发言并回应你。
 *   **挂断**: 对着麦克风说“拜拜”、“再见”或“挂断”，系统会自动结束通话。
+*   **静音**: 视频通话中点击麦克风图标可暂时关闭声音输入。
+
+### 4.4 学习模式
+*   点击输入框左侧的 **🎓/💤 切换按钮**，可进入/退出学习模式。
+*   学习模式下，BGM 自动暂停，汐宝切换为专注学习状态。
 
 ## 5. 部署与维护
 

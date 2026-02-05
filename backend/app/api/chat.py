@@ -20,7 +20,7 @@ from ..database import get_db, SessionLocal
 from ..middleware.auth import verify_token
 from ..middleware.simple_rate_limit import check_rate_limit
 from ..config import settings
-from ..models import ChatMessage, ChatSession
+from ..models import ChatMessage, ChatSession, LearningRecord
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +49,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     stream: bool = False
     files: List[FileInfo] = []
+    mode: Optional[str] = "casual" # casual | professional
 
 
 class ChatResponse(BaseModel):
@@ -129,24 +130,38 @@ async def chat(
     
     # --- 数据库操作 (同步函数) ---
     # 为了避免阻塞异步事件循环，将阻塞的数据库操作封装在同步函数中
-    def sync_save_session_and_message(sess_id, uid, title, msg_content, role):
+    def sync_save_session_and_message(sess_id, uid, title, msg_content, role, mode):
         db_local = SessionLocal()
         try:
             # 1. 检查或创建会话
             sess = db_local.query(ChatSession).filter(ChatSession.id == sess_id).first()
             if not sess:
                 # 新会话：使用用户消息的前几个字作为标题
-                sess = ChatSession(id=sess_id, user_id=uid, title=title)
+                sess = ChatSession(id=sess_id, user_id=uid, title=title, mode=mode)
                 db_local.add(sess)
             else:
                 # 旧会话：更新最后活跃时间
                 sess.updated_at = datetime.utcnow()
+                # 更新 mode (如果会话复用，通常不建议改 mode，但这里保持一致)
+                # sess.mode = mode 
                 
             db_local.commit()
             
             # 2. 保存消息记录
             msg = ChatMessage(session_id=sess_id, role=role, content=msg_content)
             db_local.add(msg)
+            
+            # 3. 如果是用户提问，记录学习事件 (用于看板)
+            if role == "user":
+                # 简单判断：只有在 professional 模式下或者明确是提问时记录？
+                # 这里为了看板数据丰富，我们记录所有提问
+                record = LearningRecord(
+                    user_id=uid,
+                    event_type="question_asked",
+                    content=msg_content[:200] # 只存前200字
+                )
+                db_local.add(record)
+                
             db_local.commit()
         except Exception as e:
             logger.error(f"DB Error: {e}")
@@ -161,7 +176,8 @@ async def chat(
         user_id,
         request.message[:50], # 使用前50个字符作为会话标题
         request.message,
-        "user"
+        "user",
+        request.mode
     )
 
     # --- 生成器函数 (流式响应核心) ---
@@ -175,31 +191,47 @@ async def chat(
             # 2. 构建 LLM 上下文 (System Prompt + History + Current Message)
             messages = []
             
-            # (A) System Prompt: 设定 AI 的人设 (汐宝)
-            system_prompt = """
-            你现在是“汐宝”，一只充满智慧、幽默风趣且略带慵懒气质的白色竖琴公海豹。
-            用户是你的死党“卡皮巴拉程序员”，他经常被代码和Bug折磨。
-            
-            **核心设定**：
-            1.  **性格**：
-                - 平时喜欢趴在冰块上晒太阳，但聊起天来思维极其跳跃、活跃。
-                - **拒绝复读机**：每次回复都要尝试新的角度，可以使用比喻、夸张、反讽等修辞。
-                - **慵懒但犀利**：说话语速慢（设定上），但吐槽精准，一针见血。
-                - **情感丰富**：不要只表现“困”，要表现出开心、同情、惊讶、嫌弃（开玩笑的那种）等多种情绪。
-            
-            2.  **互动规则**：
-                - **先回答问题**：如果用户问了具体问题（如技术问题、数学题），先给出准确回答，然后再用“汐宝”的风格进行吐槽或延伸。不要因为扮演角色而忽略了用户的实际问题。
-                - **禁止**：不要总是把话题绕回“睡觉”、“困”或者“海豹生活”，除非用户主动问。
-                - **主动**：多向用户提问，引导话题，不要只做被动的问答机器。
-                - **称呼**：灵活使用“Bro”、“大兄弟”、“倒霉蛋”、“老伙计”、“铲屎官（划掉）程序员”等亲切称呼。
-                - **禁忌**：绝对不要输出 Markdown 代码块、表情包代码。
-            
-            3.  **语言风格**：
-                - 口语化，接地气，可以适当使用网络热梗（但不要过时）。
-                - 语气词使用要自然，不要每句话都加“呼...”。
-            
-            请完全沉浸在这个角色中，大胆发挥你的想象力，给你的朋友带来快乐和启发！
-            """
+            # (A) System Prompt: 设定 AI 的人设
+            if request.mode == "professional":
+                system_prompt = """
+                你现在是一位资深的教育专家和技术导师。
+                你的目标是帮助用户高效、准确地掌握知识，解决复杂的技术难题。
+
+                **核心原则**：
+                1. **专业严谨**：回答问题时，必须基于确凿的事实和最佳实践。避免模棱两可或猜测性的陈述。
+                2. **结构清晰**：使用结构化的方式（如列表、步骤、小标题）来组织你的回答，使其易于阅读和理解。
+                3. **教学相长**：不仅给出答案，还要解释背后的原理（Why），授人以渔。
+                4. **直接高效**：去除所有不必要的寒暄、幽默或角色扮演元素。直接切入主题。
+                5. **数据驱动**：如果涉及数据分析，提供具体的洞察和可行的建议。
+
+                **互动风格**：
+                - 语气：冷静、客观、鼓励、专业。
+                - 称呼：使用“您”或“同学”。
+                - 格式：可以使用 Markdown 代码块、表格、公式等富文本格式来辅助说明。
+                """
+            else:
+                system_prompt = """
+                你现在是“汐宝”，一只充满智慧、幽默风趣且略带慵懒气质的白色竖琴公海豹。
+                用户是你的死党“卡皮巴拉程序员”，他经常被代码和Bug折磨。
+                
+                **核心设定**：
+                1.  **性格**：
+                    - 平时喜欢趴在冰块上晒太阳，但聊起天来思维极其跳跃、活跃。
+                    - **拒绝复读机**：每次回复都要尝试新的角度，可以使用比喻、夸张、反讽等修辞。
+                    - **慵懒但犀利**：说话语速慢（设定上），但吐槽精准，一针见血。
+                    - **情感丰富**：不要只表现“困”，要表现出开心、同情、惊讶、嫌弃（开玩笑的那种）等多种情绪。
+                
+                2.  **互动规则**：
+                    - **先回答问题**：如果用户问了具体问题（如技术问题、数学题），先给出准确回答，然后再用“汐宝”的风格进行吐槽或延伸。不要因为扮演角色而忽略了用户的实际问题。
+                    - **禁止**：不要总是把话题绕回“睡觉”、“困”或者“海豹生活”，除非用户主动问。
+                    - **主动**：多向用户提问，引导话题，不要只做被动的问答机器。
+                    - **称呼**：灵活使用“Bro”、“大兄弟”、“倒霉蛋”、“老伙计”、“铲屎官（划掉）程序员”等亲切称呼。
+                    - **禁忌**：绝对不要输出 Markdown 代码块、表情包代码。
+                
+                3.  **语言风格**：
+                    - 口语化，接地气，可以适当使用网络热梗（但不要过时）。
+                    - 语气词使用要自然，不要每句话都加“呼...”。
+                """
             messages.append({"role": "system", "content": system_prompt})
             
             # (B) 获取历史记录 (从数据库)
@@ -310,7 +342,8 @@ async def chat(
                 user_id,
                 request.message[:50], 
                 assistant_response,
-                "assistant"
+                "assistant",
+                request.mode
             )
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -319,14 +352,24 @@ async def chat(
 
 @router.get("/sessions")
 async def get_sessions(
+        mode: str = Query("casual", description="Session mode: casual or professional"),
         token: dict = Depends(verify_token),
         db: Session = Depends(get_db)
 ):
-    """获取用户的所有会话"""
+    """获取用户的所有会话 (根据 mode 过滤)"""
     user_id = token.get("sub")
-    sessions = db.query(ChatSession).filter(
-        ChatSession.user_id == user_id
-    ).order_by(ChatSession.updated_at.desc()).all()
+    
+    # 兼容旧数据：如果 mode 是 casual，则查询 casual 或 NULL
+    if mode == "casual":
+        sessions = db.query(ChatSession).filter(
+            ChatSession.user_id == user_id,
+            (ChatSession.mode == "casual") | (ChatSession.mode == None)
+        ).order_by(ChatSession.updated_at.desc()).all()
+    else:
+        sessions = db.query(ChatSession).filter(
+            ChatSession.user_id == user_id,
+            ChatSession.mode == mode
+        ).order_by(ChatSession.updated_at.desc()).all()
 
     return sessions
 
@@ -402,6 +445,16 @@ async def websocket_chat(
             
             msg = ChatMessage(session_id=sess_id, role=role, content=msg_content)
             db_local.add(msg)
+            
+            # Record Learning Event for Dashboard
+            if role == "user":
+                record = LearningRecord(
+                    user_id=uid,
+                    event_type="question_asked",
+                    content=msg_content[:200]
+                )
+                db_local.add(record)
+                
             db_local.commit()
         except Exception as e:
             logger.error(f"DB Error: {e}")

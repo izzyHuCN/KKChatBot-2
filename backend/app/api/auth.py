@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from ..database import get_db
-from ..models import User
+from ..models import User, LearningRecord
 from ..config import settings
 
 router = APIRouter()
@@ -95,5 +95,17 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
     access_token = create_access_token(
         data={"sub": str(user.id)}
     )
+
+    # 记录登录事件
+    try:
+        record = LearningRecord(
+            user_id=user.id,
+            event_type="login",
+            content="User logged in"
+        )
+        db.add(record)
+        db.commit()
+    except Exception as e:
+        print(f"Failed to log login event: {e}")
 
     return {"access_token": access_token, "token_type": "bearer"}
